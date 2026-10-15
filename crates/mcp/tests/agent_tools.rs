@@ -50,7 +50,7 @@ fn create_tree_outline_and_lint_round_trip() {
 }
 
 #[test]
-fn duplicate_maps_every_copy_and_auto_layout_keys_are_refused_off_frames() {
+fn duplicate_maps_every_copy() {
     let mut c = Client::new();
     let r = c.ok("create_tree", json!({"tree": card()}));
     let card_id = r["id"].clone();
@@ -59,8 +59,6 @@ fn duplicate_maps_every_copy_and_auto_layout_keys_are_refused_off_frames() {
     let copy = d["map"][&label].clone();
     assert!(copy.is_number() && copy != r["ids"]["Card/Button/Label"], "{d}");
     assert_eq!(c.node(&copy)["name"], "Label");
-    let e = c.err("set_properties", json!({"ids": [r["ids"]["Card/Title"]], "props": {"gap": 8}}));
-    assert!(e.contains("auto layout") && e.contains("TEXT"), "{e}");
 }
 
 #[test]

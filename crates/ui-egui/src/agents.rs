@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 
 use crate::FigApp;
@@ -99,6 +99,10 @@ pub struct AgentLog {
     pub port_text: Option<String>,
     /// The tab strip indicator's popover is open.
     pub popover: bool,
+    /// The clients as last read (their settings files can be large): the port they were read
+    /// for, the pass they were last shown in, and the list. Read again when the tab opens, after
+    /// an install or a removal, and when the port changes, never every frame.
+    pub clients: Option<(u16, u64, Vec<Client>)>,
 }
 
 impl AgentLog {
@@ -166,63 +170,6 @@ fn text(ui: &mut Ui, s: &str, font: FontId, color: Color32) {
     ui.add(egui::Label::new(RichText::new(s).font(font).color(color)).wrap());
 }
 
-/// A button as the design draws it: 12 px semibold, 5 × 12 padding, filled with the accent colour
-/// when `primary`, else white with a grey edge. A disabled one is dimmed and never clicks.
-fn btn(ui: &mut Ui, label: &str, primary: bool, enabled: bool) -> egui::Response {
-    let t = Tokens::get(ui.ctx());
-    let font = semibold(12.0);
-    let g = ui.painter().layout_no_wrap(label.to_string(), font.clone(), t.text);
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
-    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 24.0, g.size().y + 10.0), sense);
-    crate::a11y::button(&resp, label);
-    let hot = enabled && resp.hovered();
-    let (fill, ink) = match (primary, hot) {
-        (true, false) => (t.accent, Color32::WHITE),
-        (true, true) => (t.accent_hover, Color32::WHITE),
-        (false, false) => (t.panel, t.text),
-        (false, true) => (t.hover, t.text),
-    };
-    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
-    ui.painter().rect_filled(r, CornerRadius::same(5), dim(fill));
-    if !primary {
-        ui.painter().rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, t.border_strong), StrokeKind::Inside);
-    }
-    ui.painter().text(r.center(), Align2::CENTER_CENTER, label, font, dim(ink));
-    if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
-}
-
-/// A checkbox with a 13 px label and, under it, a 12 px explanation.
-fn check(ui: &mut Ui, on: bool, label: &str, hint: Option<&str>) -> bool {
-    let t = Tokens::get(ui.ctx());
-    let mut clicked = false;
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let (b, resp) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::click());
-        let bx = Rect::from_min_size(pos2(b.min.x, b.min.y + 2.0), vec2(14.0, 14.0));
-        if on {
-            ui.painter().rect_filled(bx, CornerRadius::same(3), t.accent);
-            icons::paint(ui.painter(), bx.shrink(1.5), Icon::Check, Color32::WHITE);
-        } else {
-            ui.painter().rect_stroke(bx, CornerRadius::same(3), Stroke::new(1.0, t.border_strong), StrokeKind::Inside);
-        }
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            let l = ui.add(egui::Label::new(RichText::new(label).font(regular(13.0)).color(t.text)).sense(Sense::click()));
-            if let Some(h) = hint {
-                text(ui, h, regular(12.0), t.text_secondary);
-            }
-            if l.clicked() {
-                clicked = true;
-            }
-        });
-        crate::a11y::checkbox(&resp, label, on);
-        if resp.clicked() {
-            clicked = true;
-        }
-    });
-    clicked
-}
-
 fn link(ui: &mut Ui, t: &Tokens, s: &str) -> bool {
     let resp = ui.add(egui::Label::new(RichText::new(s).font(regular(12.0)).color(t.accent_text)).sense(Sense::click()));
     crate::a11y::button(&resp, s);
@@ -252,7 +199,7 @@ pub fn tab(app: &mut FigApp, ui: &mut Ui) {
     if status.listening.is_none() && status.error.is_none() {
         return empty_state(app, ui, &t, port);
     }
-    let clients = app.services.agents().map(|h| h.clients(port)).unwrap_or_default();
+    let clients = cached_clients(app, ui.ctx().cumulative_pass_nr(), port);
     status_header(app, ui, &t, &status, now);
     ui.add_space(GAP);
     options(app, ui, &t, &status);
@@ -429,13 +376,13 @@ fn status_header(app: &mut FigApp, ui: &mut Ui, t: &Tokens, status: &ServerStatu
                         let from = status.error_port.unwrap_or(app.session.prefs.agents.port);
                         let free = app.services.agents().and_then(|h| h.free_port(from.saturating_add(1)));
                         if let Some(free) = free
-                            && btn(ui, &trf("Use port {port}", &[("port", &free)]), true, true).clicked()
+                            && widgets::button(ui, &trf("Use port {port}", &[("port", &free)]), true, true).clicked()
                         {
                             app.run("pref.agents", json!({"port": free}));
                             app.ui.agents.port_text = None;
                             turn_on(app, free, false);
                         }
-                        if btn(ui, tr("Try again"), false, true).clicked() {
+                        if widgets::button(ui, tr("Try again"), false, true).clicked() {
                             turn_on(app, from, false);
                         }
                     });
@@ -443,7 +390,7 @@ fn status_header(app: &mut FigApp, ui: &mut Ui, t: &Tokens, status: &ServerStatu
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 let on = status.listening.is_some();
-                if switch(ui, t, on, tr("MCP")).clicked() {
+                if widgets::switch(ui, on, tr("MCP")).clicked() {
                     if on {
                         if let Some(h) = app.services.agents() {
                             h.stop();
@@ -472,20 +419,9 @@ fn port_error(e: &str, port: u16) -> String {
     }
 }
 
-/// An on/off switch, the accent colour when on.
-fn switch(ui: &mut Ui, t: &Tokens, on: bool, label: &str) -> egui::Response {
-    let (r, resp) = ui.allocate_exact_size(vec2(36.0, 20.0), Sense::click());
-    crate::a11y::checkbox(&resp, label, on);
-    ui.painter().rect_filled(r, CornerRadius::same(10), if on { t.accent } else { t.border_strong });
-    let knob: Pos2 = if on { pos2(r.max.x - 10.0, r.center().y) } else { pos2(r.min.x + 10.0, r.center().y) };
-    ui.painter().circle_filled(knob + vec2(0.0, 0.5), 8.0, t.shadow);
-    ui.painter().circle_filled(knob, 8.0, Color32::WHITE);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
 fn options(app: &mut FigApp, ui: &mut Ui, t: &Tokens, status: &ServerStatus) {
     let prefs = app.session.prefs.agents.clone();
-    if check(ui, prefs.enabled, tr("Turn on when FigCraft starts"), None) {
+    if widgets::checkbox(ui, prefs.enabled, tr("Turn on when FigCraft starts")) {
         app.run("pref.agents", json!({"enabled": !prefs.enabled}));
     }
     ui.add_space(12.0);
@@ -495,9 +431,13 @@ fn options(app: &mut FigApp, ui: &mut Ui, t: &Tokens, status: &ServerStatus) {
         let hint = tr(
             "Files with a path save themselves a few seconds after any change, the agent's included, so the file on disk always has its latest work. A file that was never saved stays unsaved until you save it once.",
         );
-        if check(ui, app.session.prefs.auto_save, tr("Save files automatically"), Some(hint)) {
+        if widgets::checkbox(ui, app.session.prefs.auto_save, tr("Save files automatically")) {
             app.run("pref.autoSave", json!({}));
         }
+        ui.horizontal(|ui| {
+            ui.add_space(22.0);
+            text(ui, hint, regular(12.0), t.text_secondary);
+        });
     }
     ui.add_space(12.0);
     ui.horizontal(|ui| {
@@ -526,6 +466,22 @@ fn options(app: &mut FigApp, ui: &mut Ui, t: &Tokens, status: &ServerStatus) {
         };
         ui.label(RichText::new(hint).font(regular(12.0)).color(color));
     });
+}
+
+/// The clients, read again only when the tab wasn't shown in the previous pass (it just opened),
+/// or after [`AgentLog::clients`] was cleared or the port changed.
+fn cached_clients(app: &mut FigApp, pass: u64, port: u16) -> Vec<Client> {
+    let fresh = match &app.ui.agents.clients {
+        Some((p, last, _)) => *p == port && pass <= last + 1,
+        None => false,
+    };
+    if !fresh {
+        let list = app.services.agents().map(|h| h.clients(port)).unwrap_or_default();
+        app.ui.agents.clients = Some((port, pass, list));
+    }
+    let Some((_, last, list)) = &mut app.ui.agents.clients else { return Vec::new() };
+    *last = pass;
+    list.clone()
 }
 
 fn clients_list(app: &mut FigApp, ui: &mut Ui, t: &Tokens, clients: &[Client], port: u16) {
@@ -588,15 +544,15 @@ fn client_row(ui: &mut Ui, t: &Tokens, name: &str, detail: &str, row: Row<'_>) -
                 ui.spacing_mut().item_spacing.x = 8.0;
                 match row {
                     Row::Copy => {
-                        if btn(ui, tr("Copy settings"), false, true).clicked() {
+                        if widgets::button(ui, tr("Copy settings"), false, true).clicked() {
                             out = Some(ClientAction::Install);
                         }
                     }
                     Row::Client(ClientState::Missing, _) => {
-                        btn(ui, tr("Install"), false, false);
+                        widgets::button(ui, tr("Install"), false, false);
                     }
                     Row::Client(ClientState::Available, primary) => {
-                        if btn(ui, tr("Install"), primary, true).clicked() {
+                        if widgets::button(ui, tr("Install"), primary, true).clicked() {
                             out = Some(ClientAction::Install);
                         }
                     }
@@ -608,7 +564,7 @@ fn client_row(ui: &mut Ui, t: &Tokens, name: &str, detail: &str, row: Row<'_>) -
                             ui.label(RichText::new(tr("FigCraft installed")).font(semibold(12.0)).color(t.success_text));
                             let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
                             icons::paint(ui.painter(), r, Icon::Check, t.success);
-                        } else if btn(ui, tr("Update port"), true, true).clicked() {
+                        } else if widgets::button(ui, tr("Update port"), true, true).clicked() {
                             out = Some(ClientAction::Install);
                         }
                     }
@@ -631,6 +587,7 @@ fn act_on_client(app: &mut FigApp, c: &Client, act: ClientAction, port: u16) {
             Err(e) => trf("Couldn't remove FigCraft from {client}: {error}", &[("client", &c.name), ("error", &e)]),
         },
     };
+    app.ui.agents.clients = None;
     app.toast(msg);
 }
 
@@ -766,7 +723,7 @@ fn popover(app: &mut FigApp, ui: &mut Ui, t: &Tokens, pill: Rect, name: &str) {
                         app.ui.agents.popover = false;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if btn(ui, tr("Disconnect"), false, true).clicked() {
+                        if widgets::button(ui, tr("Disconnect"), false, true).clicked() {
                             if let Some(h) = app.services.agents() {
                                 h.disconnect();
                             }

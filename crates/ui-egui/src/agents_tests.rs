@@ -21,6 +21,8 @@ struct Host {
     status: ServerStatus,
     clients: Vec<Client>,
     calls: Vec<String>,
+    /// Times the clients' settings were read.
+    reads: usize,
 }
 
 #[derive(Clone, Default)]
@@ -48,6 +50,7 @@ impl AgentHost for Fake {
         Some(from)
     }
     fn clients(&mut self, _port: u16) -> Vec<Client> {
+        self.0.borrow_mut().reads += 1;
         self.0.borrow().clients.clone()
     }
     fn install(&mut self, id: &str, port: u16) -> Result<String, String> {
@@ -144,10 +147,37 @@ fn clients_install_remove_and_copy_their_settings() {
     assert_eq!(fake.0.borrow().calls.last().map(String::as_str), Some("uninstall cursor"));
     click(&mut u, "Copy settings");
     assert_eq!(*copied.borrow(), "{\"port\": 7979}");
-    // A client set up for another port asks for an update.
+    // A client set up for another port (seen once the tab reads the settings again) asks for an update.
     fake.0.borrow_mut().clients = vec![client("cursor", "Cursor", ClientState::Installed { same_port: false })];
+    u.app.ui.agents.clients = None;
+    u.frame(vec![]);
     click(&mut u, "Update port");
     assert_eq!(fake.0.borrow().calls.last().map(String::as_str), Some("install cursor 7979"));
+}
+
+#[test]
+fn the_clients_settings_are_read_when_the_tab_opens_and_after_a_change_not_every_frame() {
+    let host = Host {
+        status: ServerStatus { listening: Some(7979), ..Default::default() },
+        clients: vec![client("cursor", "Cursor", ClientState::Available)],
+        ..Default::default()
+    };
+    let (mut u, fake, _) = setup(host);
+    let reads = || fake.0.borrow().reads;
+    let first = reads();
+    for _ in 0..5 {
+        u.frame(vec![]);
+    }
+    assert_eq!(reads(), first, "open and idle: read once");
+    click(&mut u, "Install");
+    u.frame(vec![]);
+    assert_eq!(reads(), first + 1, "an install reads them again");
+    // Closed and opened again: read again (another app may have changed them meanwhile).
+    u.app.ui.preferences = false;
+    u.frame(vec![]);
+    u.app.ui.preferences = true;
+    u.frame(vec![]);
+    assert_eq!(reads(), first + 2);
 }
 
 #[test]

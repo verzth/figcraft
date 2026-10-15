@@ -9,8 +9,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
-#[cfg(target_os = "macos")]
 mod agents;
+#[cfg(target_os = "macos")]
 mod apple_events;
 mod args;
 mod control_server;

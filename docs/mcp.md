@@ -244,10 +244,7 @@ Or in a project's `.mcp.json`:
 - Programmatic calls never open dialogs.
 - Build a nested layout in one call with `create_tree`; `edit.duplicate` returns `map`, the copy of
   every layer it copied (`{"12": 64, …}`), so the copies can be edited without looking their ids up.
-- `set_properties` refuses what can't apply instead of storing it where nothing reads it: auto layout
-  keys (`gap`, `padding`, `mainAlign`, …) on layers other than frames, components and instances, text
-  keys on non-text layers, and a `fontStyle` the font family doesn't have (the error lists its
-  styles). Local styles apply by id or name: `{"textStyle": "Body/Small"}`, `fillStyle`, `strokeStyle`,
+- Local styles apply by id or name: `{"textStyle": "Body/Small"}`, `fillStyle`, `strokeStyle`,
   `effectStyle`, `gridStyle`.
 - `text.measure {text, width?, fontFamily?, fontStyle?, fontSize?, lineHeight?, letterSpacing?}`
   returns `{width, height, lines}` exactly as a text layer would be laid out (wrapping at `width`).

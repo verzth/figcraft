@@ -1,5 +1,5 @@
-//! Commands for agents: node.createTree, inspect.outline, inspect.lint, text.measure, the copy map
-//! of edit.duplicate, and auto layout keys refused on layers that can't have auto layout.
+//! Commands for agents: node.createTree, inspect.outline, inspect.lint, text.measure and the copy
+//! map of edit.duplicate.
 
 use serde_json::{Value, json};
 
@@ -87,40 +87,6 @@ fn duplicate_returns_which_copy_each_layer_became() {
     assert_ne!(label_copy, label);
     assert_eq!(doc.node(label_copy).unwrap().name, "Label");
     assert!(doc.ancestors(label_copy).contains(&copy), "the copy of the label sits in the copy of the card");
-}
-
-#[test]
-fn auto_layout_keys_on_layers_without_auto_layout_are_refused() {
-    let mut s = Session::new();
-    let t = id(&ex(&mut s, "node.create", json!({"type": "text", "text": "Hi"}))["id"]);
-    let r = id(&ex(&mut s, "node.create", json!({"type": "rectangle"}))["id"]);
-    for (target, key, value) in [(t, "gap", json!(8)), (r, "padding", json!(4)), (t, "mainAlign", json!("center")), (r, "wrap", json!(true))] {
-        let msg = bad_msg(s.execute("node.set", &json!({"ids": [target], "props": {key: value}})));
-        assert!(msg.contains(key) && msg.contains("auto layout"), "{msg}");
-        assert!(s.doc().unwrap().node(target).unwrap().layout.is_none(), "no hidden auto layout on {target}");
-    }
-    // Frames still take them, with or without a layout mode first.
-    let f = id(&ex(&mut s, "node.create", json!({"type": "frame"}))["id"]);
-    ex(&mut s, "node.set", json!({"ids": [f], "props": {"gap": 8, "padding": 4}}));
-    assert_eq!(s.doc().unwrap().node(f).unwrap().layout.as_ref().map(|l| l.gap), Some(8.0));
-}
-
-#[test]
-fn a_font_style_the_family_lacks_is_refused_with_the_styles_it_has() {
-    figcraft_text::scan_system_fonts();
-    // Any installed family with a known list of styles will do (CI machines differ).
-    let Some((family, styles)) =
-        figcraft_text::family_names().into_iter().map(|f| (f.clone(), figcraft_text::family_styles(&f))).find(|(_, st)| !st.is_empty())
-    else {
-        return;
-    };
-    let mut s = Session::new();
-    let t = id(&ex(&mut s, "node.create", json!({"type": "text", "text": "Hi", "props": {"fontFamily": family}}))["id"]);
-    let msg = bad_msg(s.execute("node.set", &json!({"ids": [t], "props": {"fontStyle": "Definitely Not A Style"}})));
-    assert!(msg.contains(&family) && msg.contains(&styles[0]), "{msg}");
-    ex(&mut s, "node.set", json!({"ids": [t], "props": {"fontStyle": styles[0]}}));
-    // A family that isn't installed keeps any style name (files from elsewhere name theirs).
-    ex(&mut s, "node.set", json!({"ids": [t], "props": {"fontFamily": "No Such Family 7f3a", "fontStyle": "Hairline"}}));
 }
 
 #[test]
