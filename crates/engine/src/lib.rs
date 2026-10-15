@@ -663,6 +663,8 @@ pub struct Prefs {
     /// `widget:<plugin>`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_actions: Vec<String>,
+    /// Preferences ▸ AI agents.
+    pub agents: AgentPrefs,
 }
 
 /// Recently run actions kept for the Actions palette (newest first).
@@ -697,7 +699,27 @@ impl Default for Prefs {
             home_sort: "modified".into(),
             home_order: "desc".into(),
             recent_actions: Vec::new(),
+            agents: AgentPrefs::default(),
         }
+    }
+}
+
+/// The port the app listens on for AI agents (MCP) and the control channel unless told otherwise.
+pub const DEFAULT_AGENT_PORT: u16 = 7979;
+
+/// Preferences ▸ AI agents: the local server MCP clients reach the app through.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentPrefs {
+    /// Listen for agents whenever the app runs.
+    pub enabled: bool,
+    /// The localhost port (1024–65535).
+    pub port: u16,
+}
+
+impl Default for AgentPrefs {
+    fn default() -> Self {
+        Self { enabled: false, port: DEFAULT_AGENT_PORT }
     }
 }
 
@@ -1500,6 +1522,8 @@ fn mark_dev_changes(doc: &mut Document, before: &Document, touched: &BTreeSet<No
 
 #[cfg(test)]
 mod a11y_keys_tests;
+#[cfg(test)]
+mod agent_tools_tests;
 #[cfg(test)]
 mod al_behaviour_tests;
 #[cfg(test)]
