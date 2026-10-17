@@ -1,0 +1,12 @@
+[package]
+name = "figcraft-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent panel backends: local agent CLIs (Claude Code, OpenCode, Codex) and direct LLM APIs driving a running FigCraft through its MCP tools"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
