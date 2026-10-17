@@ -169,6 +169,9 @@ fn reveal(path: &Path) -> std::io::Result<()> {
 /// The preferences' file in the config folder.
 const STATE: &str = "state.json";
 
+/// The Agent tab's chat history, beside the preferences.
+const AGENT_SESSIONS: &str = "AgentSessions.json";
+
 pub fn save_state(app: &FigApp) {
     if let Some(dir) = config_dir() {
         write_prefs(&dir, &app.session.prefs);
@@ -309,6 +312,22 @@ impl Services for Desktop {
     fn save_prefs(&mut self, prefs: &Prefs) {
         if let Some(dir) = &self.dir {
             write_prefs(dir, prefs);
+        }
+    }
+    fn load_agent_sessions(&mut self) -> Option<String> {
+        let dir = self.dir.as_ref()?;
+        std::fs::read_to_string(dir.join(AGENT_SESSIONS)).ok()
+    }
+    fn save_agent_sessions(&mut self, json: &str) {
+        if let Some(dir) = &self.dir {
+            // Atomic like the preferences: a crash leaves the old history whole.
+            let tmp = dir.join(format!("{AGENT_SESSIONS}.tmp"));
+            let written = std::fs::create_dir_all(dir)
+                .and_then(|()| write_private(&tmp, json.as_bytes()))
+                .and_then(|()| std::fs::rename(&tmp, dir.join(AGENT_SESSIONS)));
+            if let Err(e) = written {
+                log::warn!("agent history: couldn't save it in {}: {e}", dir.display());
+            }
         }
     }
     fn emergency_save(&mut self, session: &Session) {

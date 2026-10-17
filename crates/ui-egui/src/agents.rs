@@ -59,7 +59,7 @@ pub enum ClientState {
 }
 
 /// Which agent CLI the Agent tab runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BackendKind {
     ClaudeCode,
     OpenCode,
@@ -73,6 +73,15 @@ impl BackendKind {
             BackendKind::ClaudeCode => "Claude Code",
             BackendKind::OpenCode => "OpenCode",
             BackendKind::Codex => "Codex",
+        }
+    }
+
+    /// The backend's position in the panel's fixed list (per-backend arrays).
+    pub fn index(self) -> usize {
+        match self {
+            BackendKind::ClaudeCode => 0,
+            BackendKind::OpenCode => 1,
+            BackendKind::Codex => 2,
         }
     }
 }
@@ -751,8 +760,10 @@ pub fn indicator(app: &mut FigApp, ui: &mut Ui, rect: Rect) {
         if external {
             app.ui.agents.popover = !app.ui.agents.popover;
         } else {
-            // The panel's own agent: the pill is the shortcut to its chat.
-            app.ui.right_tab = crate::RightTab::Agent;
+            // The panel's own agent: the pill is the shortcut to its chat (left rail).
+            app.ui.left_tab = crate::LeftTab::Agent;
+            app.ui.left_collapsed = false;
+            app.ui.versions = Default::default();
         }
     }
     if app.ui.agents.popover && external {

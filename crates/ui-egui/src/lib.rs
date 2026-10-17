@@ -7,6 +7,7 @@
 
 pub mod a11y;
 pub mod agent_cursor;
+pub mod agent_models;
 pub mod agent_panel;
 pub mod agents;
 pub mod assets_panel;
@@ -75,6 +76,9 @@ mod theme_startup_tests;
 mod a11y_tests;
 #[cfg(test)]
 mod agent_cursor_tests;
+
+#[cfg(test)]
+mod agent_models_tests;
 
 #[cfg(test)]
 mod agent_panel_tests;
@@ -274,6 +278,12 @@ pub trait Services {
     /// Keep the preferences now (the installed plugins or their settings changed), as the app
     /// does when it quits.
     fn save_prefs(&mut self, _prefs: &figcraft_engine::Prefs) {}
+    /// The Agent tab's chat history (JSON), kept beside the preferences.
+    fn load_agent_sessions(&mut self) -> Option<String> {
+        None
+    }
+    /// Keep the Agent tab's chat history now (a chat opened, moved on, or was cleared).
+    fn save_agent_sessions(&mut self, _json: &str) {}
     /// The OS or browser language as a tag ("es-ES"), for the "system" language preference.
     fn system_language(&self) -> Option<String> {
         None
@@ -340,18 +350,20 @@ pub fn egui_copy_png(ctx: &egui::Context, w: u32, h: u32, rgba: &[u8]) {
     ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied([w, h], rgba));
 }
 
+/// The tab strip's right-hand panels. (The Agent chat lives in the left rail — see
+/// [`LeftTab`].)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum RightTab {
     Design,
     Prototype,
     Inspect,
-    /// The in-app agent's chat (see [`agent_panel`]).
-    Agent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum LeftTab {
     File,
+    /// The in-app agent's chat (see [`agent_panel`]).
+    Agent,
     Assets,
 }
 
@@ -1476,6 +1488,7 @@ impl FigApp {
                     let label = match self.ui.left_tab {
                         _ if self.ui.versions.open => i18n::tr("Version history"),
                         LeftTab::File => i18n::tr("Layers"),
+                        LeftTab::Agent => i18n::tr("Agent"),
                         LeftTab::Assets => i18n::tr("Assets"),
                     };
                     a11y::region(&mut self.ui.nav, ui, a11y::Region::Layers, egui::accesskit::Role::Pane, label);
@@ -1493,7 +1506,6 @@ impl FigApp {
                         RightTab::Design => i18n::tr("Design"),
                         RightTab::Prototype => i18n::tr("Prototype"),
                         RightTab::Inspect => i18n::tr("Dev Mode"),
-                        RightTab::Agent => i18n::tr("Agent"),
                     };
                     a11y::region(&mut self.ui.nav, ui, a11y::Region::Properties, egui::accesskit::Role::Pane, label);
                     right::right_panel(self, ui)

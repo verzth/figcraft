@@ -42,6 +42,8 @@ icons! {
     Text,
     Comment,
     Actions,
+    /// The Agent tab's rail icon: a sparkle, drawn from its own star polygons.
+    Sparkle,
     Chevron,
     ChevronRight,
     ChevronLeft,
@@ -534,6 +536,11 @@ fn draw(p: &P, icon: Icon) {
             p.path(&b, true);
         }
         Actions => p.poly(&[(9.0, 2.0), (3.5, 9.0), (7.5, 9.0), (6.5, 14.0), (12.5, 7.0), (8.5, 7.0)], true),
+        Sparkle => {
+            // A four-point star — long spikes, pinched waist — with a small one at its foot.
+            p.poly(&[(7.0, 1.0), (8.3, 5.7), (13.0, 7.0), (8.3, 8.3), (7.0, 13.0), (5.7, 8.3), (1.0, 7.0), (5.7, 5.7)], true);
+            p.poly(&[(12.5, 10.5), (13.1, 11.9), (14.5, 12.5), (13.1, 13.1), (12.5, 14.5), (11.9, 13.1), (10.5, 12.5), (11.9, 11.9)], true);
+        }
         Chevron => p.poly(&[(4.5, 6.0), (8.0, 9.5), (11.5, 6.0)], false),
         ChevronUp => p.poly(&[(4.5, 10.0), (8.0, 6.5), (11.5, 10.0)], false),
         ChevronRight => p.poly(&[(6.0, 4.5), (9.5, 8.0), (6.0, 11.5)], false),

@@ -168,8 +168,6 @@ fn main_toolbar(app: &mut FigApp, ui: &mut Ui, canvas: Rect, t: &Tokens) {
         crate::RightTab::Design => 1,
         crate::RightTab::Prototype => 2,
         crate::RightTab::Inspect => 3,
-        // The Agent tab has no mode of its own here: none is highlighted.
-        crate::RightTab::Agent => 4,
     };
     let seg = Rect::from_min_size(pos2(x, cy - 18.0), vec2(4.0 * 34.0 + 4.0, 36.0));
     ui.painter().rect_filled(seg, CornerRadius::same(8), t.field);

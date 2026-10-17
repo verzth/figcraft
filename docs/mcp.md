@@ -27,14 +27,16 @@ A document without a file yet isn't saved; the first change tells the agent, onc
 
 ## The Agent tab
 
-The app also runs an agent itself: the **Agent** tab in the right panel is a chat with Claude
-Code, which designs in the open document through this same server (`figcraft mcp --attach
+The app also runs an agent itself: the **Agent** tab in the left rail (below File) is a chat with
+Claude Code, opencode or codex, which designs in the open document through this same server
+(`figcraft mcp --attach
 <port>`, with a throwaway `--mcp-config` file per turn — your own Claude settings are never
 touched). Ask for anything; each tool call lands on the canvas as you watch and gets its own row
 in the transcript, and the agent's prose streams in above them. Enter sends a message, Shift+Enter
-breaks a line, Stop ends the turn (the conversation resumes where it stopped). It needs the AI
-agents server on (Preferences ▸ AI agents) and `claude` installed; conversations are kept while
-the app runs. Other backends (opencode, codex, API keys) are planned.
+breaks a line, Stop ends the turn (the conversation resumes where it stopped). It needs one of the
+backends installed (`claude`, `opencode` or `codex`); the dropdown under the chat picks the
+backend and the model, and the chat history is kept in the app's config folder
+(`AgentSessions.json`) and restored on the next launch. API-key backends are planned.
 
 Attached calls are never automatically replayed after a transport failure: the app may have
 applied the request before its reply was lost. The error reports that the operation may have

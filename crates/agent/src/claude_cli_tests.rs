@@ -203,6 +203,27 @@ mod spawn {
     }
 
     #[test]
+    fn a_restored_session_resumes_from_the_very_first_turn() {
+        let dir = std::env::temp_dir().join(format!("figcraft-agent-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = fake_claude(&dir, None);
+        let mut session = Session::new(Box::new(ClaudeCodeCli::new(&bin, "/usr/local/bin/figcraft-cli", 7979)));
+        // The panel opened a chat from its history: the CLI's old session id continues it.
+        session.resume("old-session".into());
+        session.send(&turn("halo lagi")).unwrap();
+        let got = collect_until_done(&session);
+        let text: String = got
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("resumed:yes"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_turn_refused_while_working_says_so() {
         let dir = std::env::temp_dir().join(format!("figcraft-agent-busy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

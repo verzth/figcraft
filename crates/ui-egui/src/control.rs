@@ -457,19 +457,33 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
         }
         "ui.set" => {
             if let Some(t) = p.get("rightTab").and_then(Value::as_str) {
-                app.ui.right_tab = match t {
-                    "prototype" => crate::RightTab::Prototype,
-                    "inspect" => crate::RightTab::Inspect,
-                    "agent" => crate::RightTab::Agent,
-                    _ => crate::RightTab::Design,
-                };
+                if t == "agent" {
+                    // The Agent chat lives in the left rail now; the old value keeps working.
+                    app.ui.left_tab = crate::LeftTab::Agent;
+                    app.ui.left_collapsed = false;
+                    app.ui.versions = Default::default();
+                } else {
+                    app.ui.right_tab = match t {
+                        "prototype" => crate::RightTab::Prototype,
+                        "inspect" => crate::RightTab::Inspect,
+                        _ => crate::RightTab::Design,
+                    };
+                }
             }
             if let Some(t) = p.get("prefsTab").and_then(Value::as_str) {
                 app.ui.preferences = true;
                 app.ui.prefs_tab = if t == "agents" { crate::dialogs::PrefsTab::Agents } else { crate::dialogs::PrefsTab::General };
             }
             if let Some(t) = p.get("leftTab").and_then(Value::as_str) {
-                app.ui.left_tab = if t == "assets" { crate::LeftTab::Assets } else { crate::LeftTab::File };
+                app.ui.left_tab = match t {
+                    "assets" => crate::LeftTab::Assets,
+                    "agent" => crate::LeftTab::Agent,
+                    _ => crate::LeftTab::File,
+                };
+                if t == "agent" {
+                    app.ui.left_collapsed = false;
+                    app.ui.versions = Default::default();
+                }
             }
             if let Some(t) = p.get("theme").and_then(Value::as_str) {
                 app.session.prefs.theme = t.to_string();

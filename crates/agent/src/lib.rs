@@ -117,6 +117,9 @@ pub trait Backend: Send {
     /// End the running turn early; the channel then reports [`AgentEvent::Done`] with
     /// reason `cancelled`.
     fn cancel(&mut self);
+    /// Continue a conversation the panel restored from its chat history: `id` is the session
+    /// the CLI reported earlier, so the next turn resumes it as if it had run here.
+    fn resume_with(&mut self, _id: String) {}
 }
 
 /// A backend plus its event channel. Poll [`Session::poll`] from the UI thread.
@@ -146,6 +149,12 @@ impl Session {
     /// End the running turn early.
     pub fn cancel(&mut self) {
         self.backend.cancel();
+    }
+
+    /// Restore a conversation by id: the next turn continues it (`--resume`, `--session`,
+    /// `exec resume`), as the backend's own session events would have.
+    pub fn resume(&mut self, id: String) {
+        self.backend.resume_with(id);
     }
 
     /// The events that arrived since the last poll; the UI calls this once per frame.

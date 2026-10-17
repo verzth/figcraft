@@ -115,6 +115,12 @@ impl Backend for OpenCodeCli {
         self.tx = Some(tx);
     }
 
+    fn resume_with(&mut self, id: String) {
+        if let Ok(mut slot) = self.session.lock() {
+            *slot = Some(id);
+        }
+    }
+
     fn start(&mut self, turn: &Turn) -> Result<(), AgentError> {
         if self.running.load(Ordering::SeqCst) {
             return Err(AgentError::Setup("OpenCode is still working on the last turn.".into()));

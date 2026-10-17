@@ -95,8 +95,12 @@ pub fn rail(app: &mut FigApp, ui: &mut Ui) {
     y += 44.0;
     ui.painter().line_segment([pos2(r.min.x + 18.0, y), pos2(r.max.x - 18.0, y)], Stroke::new(1.0, t.border));
     y += 12.0;
-    let items =
-        [(Icon::Page, tr("File"), Some(LeftTab::File)), (Icon::Assets, tr("Assets"), Some(LeftTab::Assets)), (Icon::Styles, tr("Variables"), None)];
+    let items = [
+        (Icon::Page, tr("File"), Some(LeftTab::File)),
+        (Icon::Sparkle, tr("Agent"), Some(LeftTab::Agent)),
+        (Icon::Assets, tr("Assets"), Some(LeftTab::Assets)),
+        (Icon::Styles, tr("Variables"), None),
+    ];
     for (icon, label, tab) in items {
         let ir = Rect::from_center_size(pos2(r.center().x, y + 14.0), vec2(36.0, 28.0));
         let hit = Rect::from_min_max(pos2(r.min.x, y), pos2(r.max.x, y + 48.0));
@@ -111,6 +115,10 @@ pub fn rail(app: &mut FigApp, ui: &mut Ui) {
             ui.painter().rect_filled(ir, CornerRadius::same(6), t.hover);
         }
         icons::paint(ui.painter(), Rect::from_center_size(ir.center(), vec2(16.0, 16.0)), icon, if active { t.accent_text } else { t.icon });
+        // An agent turn is running: a dot on its icon (the tab's own working light).
+        if tab == Some(LeftTab::Agent) && app.ui.agent.chats.iter().any(|c| c.running) {
+            ui.painter().circle_filled(pos2(ir.max.x - 3.0, ir.min.y + 3.0), 3.5, t.accent);
+        }
         let shown = crate::widgets::elide_font(ui, label, (r.width() - 6.0).max(0.0), regular(10.0));
         ui.painter().text(pos2(r.center().x, y + 38.0), Align2::CENTER_CENTER, shown, regular(10.0), t.text);
         if resp.clicked() {
@@ -137,6 +145,12 @@ pub fn rail(app: &mut FigApp, ui: &mut Ui) {
 pub fn left_panel(app: &mut FigApp, ui: &mut Ui) {
     if app.ui.versions.open {
         crate::versions::panel(app, ui);
+        return;
+    }
+    // The Agent chat draws its own header (the session dropdown and New chat), so the file
+    // name block is skipped; the collapse button lives at that header's right end.
+    if app.ui.left_tab == LeftTab::Agent {
+        crate::agent_panel::panel(app, ui);
         return;
     }
     let t = Tokens::get(ui.ctx());
@@ -169,6 +183,7 @@ pub fn left_panel(app: &mut FigApp, ui: &mut Ui) {
             pages(app, ui);
             layers(app, ui);
         }
+        LeftTab::Agent => {}
         LeftTab::Assets => crate::assets_panel::show(app, ui),
     }
 }
