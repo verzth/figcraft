@@ -194,6 +194,11 @@ impl AgentHost for DesktopAgents {
     fn config_json(&self, port: u16) -> String {
         serde_json::to_string_pretty(&json!({"mcpServers": {SERVER_NAME: self.entry(port)}})).unwrap_or_default()
     }
+
+    fn panel_bins(&mut self) -> Option<(PathBuf, PathBuf)> {
+        let claude = self.home.as_deref().and_then(find_claude)?;
+        Some((claude, self.exe.clone()))
+    }
 }
 
 /// Claude Desktop's settings folder on this platform.

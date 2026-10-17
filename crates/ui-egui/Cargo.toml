@@ -17,6 +17,7 @@ figcraft-layout = { workspace = true }
 figcraft-render = { workspace = true }
 figcraft-pathops = { workspace = true }
 figcraft-engine = { workspace = true }
+figcraft-agent = { workspace = true }
 figcraft-format = { workspace = true }
 egui = { workspace = true }
 serde = { workspace = true }

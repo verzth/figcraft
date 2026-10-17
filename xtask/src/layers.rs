@@ -73,12 +73,14 @@ pub fn check(root: &std::path::Path) -> bool {
 
 fn same_layer_ok(from: &str, to: &str) -> bool {
     // Within L0: color uses geom types; within L2: text/layout/pathops/collab are independent;
-    // within L6 the MCP server joins live sessions through collab-net.
+    // within L6 the MCP server joins live sessions through collab-net, and the Agent tab runs
+    // the agent backends beside the MCP server whose tools they drive.
     matches!(
         (from, to),
         ("figcraft-color", "figcraft-geom")
             | ("figcraft-render", "figcraft-format")
             | ("figcraft-mcp", "figcraft-collab-net")
             | ("figcraft-agent", "figcraft-mcp")
+            | ("figcraft-ui-egui", "figcraft-agent")
     )
 }

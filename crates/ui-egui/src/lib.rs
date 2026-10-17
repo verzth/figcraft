@@ -7,6 +7,7 @@
 
 pub mod a11y;
 pub mod agent_cursor;
+pub mod agent_panel;
 pub mod agents;
 pub mod assets_panel;
 pub mod bidi;
@@ -75,6 +76,8 @@ mod a11y_tests;
 #[cfg(test)]
 mod agent_cursor_tests;
 
+#[cfg(test)]
+mod agent_panel_tests;
 #[cfg(test)]
 mod agents_tests;
 #[cfg(test)]
@@ -342,6 +345,8 @@ pub enum RightTab {
     Design,
     Prototype,
     Inspect,
+    /// The in-app agent's chat (see [`agent_panel`]).
+    Agent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -577,6 +582,8 @@ pub struct UiState {
     /// Where an agent driving the app through the control channel last pointed (the agent cursor
     /// drawn on the canvas).
     pub agent_cursor: agent_cursor::AgentCursor,
+    /// The Agent tab: conversations with the in-app agent (see [`agent_panel`]).
+    pub agent: agent_panel::AgentUi,
     /// Home ▸ Online.
     pub online: online::OnlineUi,
     /// The window was asked to close with unsaved changes: the question shows.
@@ -675,6 +682,7 @@ impl Default for UiState {
             plugin_form: None,
             live: live::LiveUi::default(),
             agent_cursor: agent_cursor::AgentCursor::default(),
+            agent: agent_panel::AgentUi::default(),
             online: online::OnlineUi::default(),
             confirm_close: false,
         }
@@ -1409,6 +1417,9 @@ impl FigApp {
         self.poll_dialog(&ctx);
         // Control requests run first so their results reflect this frame.
         control::drain(self, &ctx);
+        // The Agent tab's events apply every frame, whether the tab shows or not (the pill and
+        // the streaming transcript keep up with a hidden panel).
+        agent_panel::poll(self, &ctx);
         windows::requests(self, &ctx);
         // Before any widget: the navigation keys (F6, Tab, arrows, Escape) move the keyboard.
         a11y::begin(self, &ctx);
@@ -1482,6 +1493,7 @@ impl FigApp {
                         RightTab::Design => i18n::tr("Design"),
                         RightTab::Prototype => i18n::tr("Prototype"),
                         RightTab::Inspect => i18n::tr("Dev Mode"),
+                        RightTab::Agent => i18n::tr("Agent"),
                     };
                     a11y::region(&mut self.ui.nav, ui, a11y::Region::Properties, egui::accesskit::Role::Pane, label);
                     right::right_panel(self, ui)

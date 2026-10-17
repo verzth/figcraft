@@ -18,6 +18,8 @@ use crate::widgets;
 const ACTIVITY_MAX: usize = 50;
 /// Rows of activity the tab shows.
 const ACTIVITY_SHOWN: usize = 8;
+/// How long the tab-strip pill stays lit after the in-app Agent panel's agent last worked.
+const PANEL_LIT: f64 = 30.0;
 /// The tab's content width (Preferences draws it right of its sidebar).
 pub const WIDTH: f32 = 515.0;
 
@@ -73,6 +75,11 @@ pub trait AgentHost {
     fn uninstall(&mut self, id: &str) -> Result<(), String>;
     /// The settings to paste into any other MCP client.
     fn config_json(&self, port: u16) -> String;
+    /// The Agent tab's backend, when this computer has one: the `claude` executable and this
+    /// app's own executable (which serves `mcp --attach PORT`), in that order.
+    fn panel_bins(&mut self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        None
+    }
 }
 
 /// One thing an agent did.
@@ -103,6 +110,9 @@ pub struct AgentLog {
     /// for, the pass they were last shown in, and the list. Read again when the tab opens, after
     /// an install or a removal, and when the port changes, never every frame.
     pub clients: Option<(u16, u64, Vec<Client>)>,
+    /// The in-app Agent panel's last activity (UI clock): any event its agent applied, or a
+    /// turn still running. The tab-strip pill stays lit for [`PANEL_LIT`] seconds after it.
+    pub panel_at: Option<f64>,
 }
 
 impl AgentLog {
@@ -137,6 +147,20 @@ impl AgentLog {
     pub fn client_name(&self) -> String {
         let raw = self.client.as_ref().map(|(n, _)| n.as_str()).unwrap_or_default();
         pretty_client(raw).unwrap_or_else(|| tr("An AI agent").to_string())
+    }
+
+    /// The in-app Agent panel's agent worked at `now` (an event applied, or a turn runs).
+    /// Called by the panel's per-frame poll; nothing else touches it.
+    pub fn note_panel_activity(&mut self, now: f64) {
+        self.panel_at = Some(now);
+    }
+
+    /// `(seconds since the panel's agent last worked, 1 while a turn runs)` while it worked
+    /// within the last [`PANEL_LIT`] seconds: the pill's reason to stay lit for the panel.
+    pub fn panel_status(&self, now: f64) -> Option<(u64, bool)> {
+        let at = self.panel_at?;
+        let age = (now - at).max(0.0);
+        (age <= PANEL_LIT).then_some((age as u64, age < 1.0))
     }
 }
 
@@ -659,23 +683,33 @@ fn activity(app: &mut FigApp, ui: &mut Ui, t: &Tokens, status: &ServerStatus, no
 
 // ---------- the tab strip indicator ----------
 
-/// The width [`indicator`] takes, or 0 when no agent is connected.
+/// The width [`indicator`] takes, or 0 when no agent is connected or working.
 pub fn indicator_width(app: &mut FigApp, ui: &Ui) -> f32 {
+    let now = ui.input(|i| i.time);
     let Some(status) = app.services.agents().map(|h| h.status()) else { return 0.0 };
     app.ui.agents.sync(&status);
-    if !app.ui.agents.connected(&status) {
+    // An external client, or the in-app Agent panel's agent within the lit window.
+    let external = app.ui.agents.connected(&status);
+    if !external && app.ui.agents.panel_status(now).is_none() {
         app.ui.agents.popover = false;
         return 0.0;
     }
-    let name = app.ui.agents.client_name();
+    let name = pill_name(app, external);
     ui.painter().layout_no_wrap(name, semibold(12.0), Color32::WHITE).size().x + 37.0
 }
 
-/// A pill in the tab strip while an agent is connected: who it is. A click opens a popover with
-/// what it did, AI agents settings and Disconnect.
+/// Who the pill names: the connected client, or the in-app panel's agent.
+fn pill_name(app: &FigApp, external: bool) -> String {
+    if external { app.ui.agents.client_name() } else { crate::agent_panel::BACKEND_NAME.to_string() }
+}
+
+/// A pill in the tab strip while an agent is connected or the panel's agent is working: who it
+/// is. A click opens a popover with what it did and AI agents settings (or, panel-only, the
+/// Agent tab itself).
 pub fn indicator(app: &mut FigApp, ui: &mut Ui, rect: Rect) {
     let t = Tokens::get(ui.ctx());
-    let name = app.ui.agents.client_name();
+    let external = app.services.agents().map(|h| h.status()).is_some_and(|status| app.ui.agents.connected(&status));
+    let name = pill_name(app, external);
     let resp = ui.interact(rect, ui.id().with("agent_indicator"), Sense::click());
     crate::a11y::button(&resp, &name);
     let p = ui.painter();
@@ -684,9 +718,14 @@ pub fn indicator(app: &mut FigApp, ui: &mut Ui, rect: Rect) {
     p.circle_filled(pos2(rect.min.x + 14.0, rect.center().y), 3.5, t.success);
     p.text(pos2(rect.min.x + 24.0, rect.center().y), Align2::LEFT_CENTER, &name, semibold(12.0), t.text);
     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-        app.ui.agents.popover = !app.ui.agents.popover;
+        if external {
+            app.ui.agents.popover = !app.ui.agents.popover;
+        } else {
+            // The panel's own agent: the pill is the shortcut to its chat.
+            app.ui.right_tab = crate::RightTab::Agent;
+        }
     }
-    if app.ui.agents.popover {
+    if app.ui.agents.popover && external {
         popover(app, ui, &t, rect, &name);
     }
 }

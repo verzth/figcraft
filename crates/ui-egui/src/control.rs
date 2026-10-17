@@ -460,6 +460,7 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
                 app.ui.right_tab = match t {
                     "prototype" => crate::RightTab::Prototype,
                     "inspect" => crate::RightTab::Inspect,
+                    "agent" => crate::RightTab::Agent,
                     _ => crate::RightTab::Design,
                 };
             }
