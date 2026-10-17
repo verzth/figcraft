@@ -7,6 +7,8 @@
 //! - `document.inspect {depth?, allPages?}` / `node.get {id, depth?}`
 //! - `ui.inspect {}` — panel/tab/tool state, canvas rect, timings
 //! - `ui.pointer {kind: down|move|up|click|double|hover|drag, x, y (page) | sx, sy (screen), to?, shift?, alt?, cmd?}`
+//!   (its position also moves the agent cursor drawn on the canvas, tagged with the connected
+//!   client's name and fading when the agent goes quiet)
 //! - `ui.key {key, shift?, cmd?, alt?}` — a shortcut as if typed on the canvas
 //! - `ui.type {text}` — type into the text being edited
 //! - `ui.input {events: [{move|down|up: [x, y], button?} | {key, shift?, alt?, cmd?} | {text} | {leave}
@@ -192,6 +194,12 @@ pub fn drain_hidden(app: &mut FigApp, ctx: &Context) {
             continue;
         }
         if !hidden(ctx, target) || !NO_FRAME.contains(&r.method.as_str()) {
+            // The agent's pointer keeps its place on the canvas even while this window draws no
+            // frames (the input itself waits for one, and runs when the window shows again).
+            if hidden(ctx, target) {
+                let now = ctx.input(|i| i.time);
+                crate::windows::as_window(app, target, |app| crate::agent_cursor::note(app, &r.method, &r.params, now));
+            }
             // Another window on screen draws only when asked: while the main window is hidden no
             // frame of it does that (`drain`), so ask here.
             if target != app.windows.current && !hidden(ctx, target) {
@@ -307,7 +315,10 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             }
             Ok(v)
         }
-        "ui.pointer" => pointer(app, p),
+        "ui.pointer" => {
+            crate::agent_cursor::note(app, "ui.pointer", p, ctx.input(|i| i.time));
+            pointer(app, p)
+        }
         "ui.key" => {
             let key = p.get("key").and_then(Value::as_str).ok_or("`key` required")?;
             let m = figcraft_engine::keymap::Mods { shift: b(p, "shift"), alt: b(p, "alt"), cmd: b(p, "cmd"), ctrl: b(p, "ctrl") };
@@ -363,6 +374,7 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             }
         }
         "ui.input" => {
+            crate::agent_cursor::note(app, "ui.input", p, ctx.input(|i| i.time));
             let list = p
                 .get("events")
                 .and_then(Value::as_array)

@@ -6,6 +6,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod a11y;
+pub mod agent_cursor;
 pub mod agents;
 pub mod assets_panel;
 pub mod bidi;
@@ -71,6 +72,9 @@ mod theme_startup_tests;
 
 #[cfg(test)]
 mod a11y_tests;
+#[cfg(test)]
+mod agent_cursor_tests;
+
 #[cfg(test)]
 mod agents_tests;
 #[cfg(test)]
@@ -570,6 +574,9 @@ pub struct UiState {
     pub plugin_form: Option<plugins_ui::PluginForm>,
     /// Live sessions: remote cursors as drawn, the Join dialog.
     pub live: live::LiveUi,
+    /// Where an agent driving the app through the control channel last pointed (the agent cursor
+    /// drawn on the canvas).
+    pub agent_cursor: agent_cursor::AgentCursor,
     /// Home ▸ Online.
     pub online: online::OnlineUi,
     /// The window was asked to close with unsaved changes: the question shows.
@@ -667,6 +674,7 @@ impl Default for UiState {
             plugins_manage: plugins_ui::PluginsWindow::default(),
             plugin_form: None,
             live: live::LiveUi::default(),
+            agent_cursor: agent_cursor::AgentCursor::default(),
             online: online::OnlineUi::default(),
             confirm_close: false,
         }

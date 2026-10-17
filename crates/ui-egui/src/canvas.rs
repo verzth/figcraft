@@ -255,6 +255,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     crate::comments::draw(app, &painter);
     crate::live_text::draw(app, &painter);
     crate::live::draw(app, &painter, &ctx);
+    crate::agent_cursor::draw(app, &painter, &ctx);
     crate::live::chat_box(app, &ctx);
     crate::live::spotlight_banner(app, &ctx, rect);
     crate::comments::popovers(app, &ctx);

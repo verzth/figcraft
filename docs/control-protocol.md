@@ -41,7 +41,8 @@ still answers `engine.execute`, `engine.commands`, `document.inspect`, `node.get
 and `ui.render`, acting on the file that window shows, so an attached agent can edit, inspect and
 save while the app is out of sight. Screenshots, input (`ui.input`,
 `ui.pointer`, `ui.key`, `ui.type`) and the interface's own state wait for the window to show, and
-time out after 60 s if it doesn't.
+time out after 60 s if it doesn't. (`ui.pointer` and `ui.input` positions still move the agent
+cursor while it waits, so it's where the agent last pointed when the window shows again.)
 
 Coordinates are page units, y down. `x`/`y` in `node.set`/`node.create` are relative to the parent
 frame (groups have no coordinate space of their own).
@@ -179,7 +180,10 @@ A mouse gesture with the current tool. `kind`: `down`, `move`, `up`, `click`, `d
 (`x`, `y`) or screen pixels (`sx`, `sy`). `pressure` (0–1) is pen pressure (the Pencil records
 it); a drag's pressure goes from `pressure` to `pressureTo`. Returns `{selection, tool}`. With the Move and Scale
 tools, a press on a frame's or section's name label (as the canvas last drew it, along a rotated
-frame's top edge) selects and drags that frame.
+frame's top edge) selects and drags that frame. Every position also moves the **agent cursor** on
+the canvas: the pointer drawn where the agent is, tagged with the connected client's name (as a
+live session shows everyone's cursor), which glides there and fades a couple of seconds after the
+last report.
 
 ```json
 {"id":4,"method":"engine.execute","params":{"command":"tool.set","params":{"tool":"ellipse"}}}
