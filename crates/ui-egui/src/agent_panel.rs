@@ -1,8 +1,9 @@
 //! The Agent tab: an AI agent designing in the open document, chat-style.
 //!
-//! One worker thread per conversation owns a [`figcraft_agent::Session`] (Claude Code in
-//! print mode for now) and forwards its events over a channel the panel drains once per
-//! frame, so the window never blocks. The agent reaches this app through the same
+//! One worker thread per conversation owns a [`figcraft_agent::Session`] and forwards its
+//! events over a channel the panel drains once per frame, so the window never blocks. The
+//! backend is whichever CLI this computer has — Claude Code, OpenCode or Codex — picked on
+//! the backend line above the input; the agent reaches this app through the same
 //! `figcraft-app` MCP server the external clients use in Preferences ▸ AI agents, and its
 //! tool calls land here as ordinary control-channel commands.
 
@@ -11,11 +12,12 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
 use egui::{Color32, CornerRadius, Key, Layout, RichText, Sense, Ui, vec2};
-use figcraft_agent::{AgentEvent, ClaudeCodeCli, Session, Turn};
+use figcraft_agent::{AgentEvent, Backend, ClaudeCodeCli, CodexCli, OpenCodeCli, Session, Turn};
 
 use crate::FigApp;
+use crate::agents::{BackendKind, PanelBackend};
 use crate::dialogs::PrefsTab;
-use crate::i18n::tr;
+use crate::i18n::{tr, trf};
 use crate::theme::{Tokens, regular, semibold};
 use crate::widgets;
 
@@ -24,8 +26,6 @@ const POLL_MS: u64 = 30;
 /// The input block's height below the transcript (backend line + field), so the input sits at
 /// the panel's bottom edge; slightly generous to keep the outer scroll area from appearing.
 const INPUT_H: f32 = 112.0;
-/// The backend's name, on the panel and in the tab-strip pill while it works.
-pub const BACKEND_NAME: &str = "Claude Code";
 
 /// One transcript row.
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +50,8 @@ pub struct Chat {
     pub running: bool,
     /// Tokens used, when the backend reports them.
     pub tokens: Option<(u64, u64)>,
+    /// Whom this conversation runs (set on the first send; the pill names it).
+    pub backend_name: Option<&'static str>,
     link: Option<Link>,
 }
 
@@ -78,13 +80,36 @@ pub struct AgentUi {
     pub active: usize,
     /// The text being typed (shared across conversations, as one draft box).
     pub draft: String,
-    /// Why the last send couldn't start (no server, no Claude Code…), shown above the input.
+    /// Why the last send couldn't start (no server, no backend…), shown above the input.
     pub setup_error: Option<String>,
+    /// The backends found on this computer (scanned once, when the tab first draws).
+    pub backends: Vec<PanelBackend>,
+    /// Whether `backends` has been looked up yet.
+    pub resolved: bool,
+    /// Which backend the next turn uses (an index into `backends`).
+    pub backend: usize,
+}
+
+impl AgentUi {
+    /// The backend the next turn will use, as shown; "Agent" when this computer has none.
+    pub fn selected_name(&self) -> String {
+        self.backends.get(self.backend).map(|b| b.kind.name().to_string()).unwrap_or_else(|| tr("Agent").to_string())
+    }
+
+    /// Whom the tab-strip pill names: the active conversation's backend once it has spoken,
+    /// else the backend the next turn would use.
+    pub fn pill_name(&self) -> String {
+        match self.chats.get(self.active).and_then(|c| c.backend_name) {
+            Some(name) => name.to_string(),
+            None => self.selected_name(),
+        }
+    }
 }
 
 /// Draw the tab: header, transcript, then the input box. (Events are drained every frame by
 /// [`poll`], whether this tab shows or not.)
 pub fn panel(app: &mut FigApp, ui: &mut Ui) {
+    ensure_backends(app);
     if app.ui.agent.chats.is_empty() {
         app.ui.agent.chats.push(Chat::default());
     }
@@ -92,6 +117,18 @@ pub fn panel(app: &mut FigApp, ui: &mut Ui) {
     header(app, ui);
     transcript(app, ui);
     input(app, ui, &ctx);
+}
+
+/// Look the backends up once, the first time the tab draws (a PATH scan, not a per-frame one).
+fn ensure_backends(app: &mut FigApp) {
+    if app.ui.agent.resolved {
+        return;
+    }
+    app.ui.agent.backends = app.services.agents().map(|h| h.panel_backends()).unwrap_or_default();
+    app.ui.agent.resolved = true;
+    if app.ui.agent.backend >= app.ui.agent.backends.len() {
+        app.ui.agent.backend = 0;
+    }
 }
 
 /// The top row: a new chat on the left, the turn's status (and tokens) on the right.
@@ -268,10 +305,19 @@ fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
         });
         ui.add_space(4.0);
     }
-    // Backend line: Stop while a turn runs, Send when there's something to say.
+    // Backend line: which CLI runs the next turn (a chevron cycles when this computer has
+    // more than one), and Stop while a turn runs, Send when there's something to say.
     ui.horizontal(|ui| {
         ui.add_space(widgets::PAD);
-        ui.label(RichText::new(BACKEND_NAME).font(semibold(10.5)).color(t.text_secondary));
+        let name = app.ui.agent.selected_name();
+        ui.label(RichText::new(name).font(semibold(10.5)).color(t.text_secondary));
+        let n = app.ui.agent.backends.len();
+        if n > 1 {
+            let next = app.ui.agent.backends[(app.ui.agent.backend + 1) % n].kind.name().to_string();
+            if widgets::icon_button(ui, crate::icons::Icon::Chevron, &trf("Switch to {name}", &[("name", &next)])) {
+                app.ui.agent.backend = (app.ui.agent.backend + 1) % n;
+            }
+        }
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(widgets::PAD);
             let sendable = !running && !app.ui.agent.draft.trim().is_empty();
@@ -333,7 +379,7 @@ fn send_turn(app: &mut FigApp, ctx: &egui::Context) {
                 chat.rows.push(Row::Error(why));
             }
         }
-        Ok((claude, exe, port)) => {
+        Ok((backend, exe, port)) => {
             if let Some(chat) = app.ui.agent.chats.get_mut(active) {
                 if chat.running {
                     return;
@@ -341,11 +387,13 @@ fn send_turn(app: &mut FigApp, ctx: &egui::Context) {
                 if chat.link.is_none() {
                     let (tx_cmd, rx_cmd) = mpsc::channel();
                     let (tx_ev, rx_ev) = mpsc::channel();
+                    let built = build_backend(backend.kind, backend.bin, exe, port);
                     // The worker outlives this call: it needs its own clone of the context.
                     let ctx = ctx.clone();
-                    std::thread::spawn(move || worker(claude, exe, port, rx_cmd, tx_ev, ctx));
+                    std::thread::spawn(move || worker(built, rx_cmd, tx_ev, ctx));
                     chat.link = Some(Link { cmd: tx_cmd, events: rx_ev });
                 }
+                chat.backend_name = Some(backend.kind.name());
                 chat.rows.push(Row::User(text.clone()));
                 chat.running = true;
                 if let Some(link) = &chat.link {
@@ -364,19 +412,38 @@ fn cancel(app: &mut FigApp) {
     }
 }
 
-/// What the panel needs to spawn an agent: the `claude` binary, this app's executable (the
+/// What the panel needs to spawn an agent: the selected backend, this app's executable (the
 /// MCP server the agent drives), and the port the control server listens on.
-fn backend_info(app: &mut FigApp) -> Result<(PathBuf, PathBuf, u16), String> {
-    let host = app.services.agents().ok_or_else(|| tr("The AI agents server is not running. Turn it on in Preferences ▸ AI agents.").to_string())?;
-    let port =
-        host.status().listening.ok_or_else(|| tr("The AI agents server is not running. Turn it on in Preferences ▸ AI agents.").to_string())?;
-    let (claude, exe) = host.panel_bins().ok_or_else(|| tr("Claude Code was not found on this computer.").to_string())?;
-    Ok((claude, exe, port))
+fn backend_info(app: &mut FigApp) -> Result<(PanelBackend, PathBuf, u16), String> {
+    ensure_backends(app);
+    let no_server = || tr("The AI agents server is not running. Turn it on in Preferences ▸ AI agents.").to_string();
+    let (exe, port) = {
+        let host = app.services.agents().ok_or_else(no_server)?;
+        let port = host.status().listening.ok_or_else(no_server)?;
+        let exe = host.mcp_exe().ok_or_else(no_server)?;
+        (exe, port)
+    };
+    app.ui
+        .agent
+        .backends
+        .get(app.ui.agent.backend)
+        .cloned()
+        .map(|backend| (backend, exe, port))
+        .ok_or_else(|| tr("No agent backend was found on this computer.").to_string())
+}
+
+/// The backend this conversation's worker runs, from what the host found on this computer.
+fn build_backend(kind: BackendKind, bin: PathBuf, exe: PathBuf, port: u16) -> Box<dyn Backend> {
+    match kind {
+        BackendKind::ClaudeCode => Box::new(ClaudeCodeCli::new(bin, exe, port)),
+        BackendKind::OpenCode => Box::new(OpenCodeCli::new(bin, exe, port)),
+        BackendKind::Codex => Box::new(CodexCli::new(bin, exe, port)),
+    }
 }
 
 /// One conversation's worker: it owns the session, takes commands, forwards events.
-fn worker(claude: PathBuf, exe: PathBuf, port: u16, cmd: Receiver<Cmd>, events: Sender<AgentEvent>, ctx: egui::Context) {
-    let mut session = Session::new(Box::new(ClaudeCodeCli::new(claude, exe, port)));
+fn worker(backend: Box<dyn Backend>, cmd: Receiver<Cmd>, events: Sender<AgentEvent>, ctx: egui::Context) {
+    let mut session = Session::new(backend);
     // While a turn runs, repaint steadily even when the model is silent: the panel's header,
     // the caret and the tab-strip pill all track "working" through the per-frame poll.
     let mut busy = false;

@@ -8,11 +8,20 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod claude_cli;
+mod codex_cli;
+mod opencode_cli;
+mod pump;
 
 #[cfg(test)]
 mod claude_cli_tests;
+#[cfg(test)]
+mod codex_cli_tests;
+#[cfg(test)]
+mod opencode_cli_tests;
 
 pub use claude_cli::{ClaudeCodeCli, SYSTEM_PROMPT_NOTE};
+pub use codex_cli::CodexCli;
+pub use opencode_cli::OpenCodeCli;
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 

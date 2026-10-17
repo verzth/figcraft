@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use figcraft_ui_egui::ControlRequest;
-use figcraft_ui_egui::agents::{AgentHost, Client, ClientState, ServerStatus};
+use figcraft_ui_egui::agents::{AgentHost, BackendKind, Client, ClientState, PanelBackend, ServerStatus};
 use serde_json::{Map, Value, json};
 
 use crate::control_server::ControlServer;
@@ -195,9 +195,20 @@ impl AgentHost for DesktopAgents {
         serde_json::to_string_pretty(&json!({"mcpServers": {SERVER_NAME: self.entry(port)}})).unwrap_or_default()
     }
 
-    fn panel_bins(&mut self) -> Option<(PathBuf, PathBuf)> {
-        let claude = self.home.as_deref().and_then(find_claude)?;
-        Some((claude, self.exe.clone()))
+    /// The Agent tab's backends, in the order the tab prefers them (empty when this
+    /// computer has none).
+    fn panel_backends(&mut self) -> Vec<PanelBackend> {
+        let Some(home) = self.home.as_deref() else { return Vec::new() };
+        let claude_extra = [home.join(".claude/local")];
+        [(BackendKind::ClaudeCode, "claude", &claude_extra[..]), (BackendKind::OpenCode, "opencode", &[][..]), (BackendKind::Codex, "codex", &[][..])]
+            .iter()
+            .filter_map(|(kind, cmd, extra)| find_command(home, cmd, extra).map(|bin| PanelBackend { kind: *kind, bin }))
+            .collect()
+    }
+
+    /// This app's executable, which the backends run as `… mcp --attach PORT`.
+    fn mcp_exe(&self) -> Option<PathBuf> {
+        Some(self.exe.clone())
     }
 }
 
@@ -212,19 +223,31 @@ fn claude_desktop_dir(home: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Claude Code's `claude` command: on the PATH, or where its installers put it (an app started
-/// from the Finder or the Dock has a short PATH).
+/// Claude Code's `claude` command wherever it is.
 fn find_claude(home: &Path) -> Option<PathBuf> {
-    let names: &[&str] = if cfg!(windows) { &["claude.exe", "claude.cmd"] } else { &["claude"] };
-    let path_dirs = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
-    let usual = [
-        home.join(".local/bin"),
-        home.join(".claude/local"),
-        home.join(".npm-global/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-    ];
-    path_dirs.iter().chain(usual.iter()).flat_map(|d| names.iter().map(move |n| d.join(n))).find(|p| p.is_file())
+    find_command(home, "claude", &[home.join(".claude/local")])
+}
+
+/// A command: on the PATH, or where its installers put it (an app started from the Finder or
+/// the Dock has a short PATH) — including nvm's Node, where the npm globals (`opencode`,
+/// `codex`, `claude`) live.
+fn find_command(home: &Path, name: &str, extra: &[PathBuf]) -> Option<PathBuf> {
+    let names: Vec<String> = if cfg!(windows) { vec![format!("{name}.exe"), format!("{name}.cmd")] } else { vec![name.to_string()] };
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
+    dirs.extend([home.join(".local/bin"), home.join(".npm-global/bin"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
+    dirs.extend(extra.iter().cloned());
+    dirs.extend(nvm_bins(home));
+    dirs.iter().flat_map(|d| names.iter().map(move |n| d.join(n))).find(|p| p.is_file())
+}
+
+/// The `bin` of every Node version nvm installed; the newest sorts first on a version that
+/// sorts last lexicographically ("v9" > "v10"), which only matters when a command is in both.
+fn nvm_bins(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) else { return Vec::new() };
+    let mut bins: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("bin")).filter(|p| p.is_dir()).collect();
+    bins.sort();
+    bins.reverse();
+    bins
 }
 
 /// `~/…` for paths in the home folder, as people read them.

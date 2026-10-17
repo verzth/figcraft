@@ -58,6 +58,32 @@ pub enum ClientState {
     Installed { same_port: bool },
 }
 
+/// Which agent CLI the Agent tab runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendKind {
+    ClaudeCode,
+    OpenCode,
+    Codex,
+}
+
+impl BackendKind {
+    /// Its name as shown on the panel, in the pill and in translations.
+    pub fn name(&self) -> &'static str {
+        match self {
+            BackendKind::ClaudeCode => "Claude Code",
+            BackendKind::OpenCode => "OpenCode",
+            BackendKind::Codex => "Codex",
+        }
+    }
+}
+
+/// One agent backend found on this computer: which CLI, and its executable.
+#[derive(Clone, Debug)]
+pub struct PanelBackend {
+    pub kind: BackendKind,
+    pub bin: std::path::PathBuf,
+}
+
 /// The app side of the AI agents tab (desktop only).
 pub trait AgentHost {
     fn status(&self) -> ServerStatus;
@@ -75,9 +101,13 @@ pub trait AgentHost {
     fn uninstall(&mut self, id: &str) -> Result<(), String>;
     /// The settings to paste into any other MCP client.
     fn config_json(&self, port: u16) -> String;
-    /// The Agent tab's backend, when this computer has one: the `claude` executable and this
-    /// app's own executable (which serves `mcp --attach PORT`), in that order.
-    fn panel_bins(&mut self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    /// The Agent tab's backends, in the order the tab prefers them (empty when this
+    /// computer has none).
+    fn panel_backends(&mut self) -> Vec<PanelBackend> {
+        Vec::new()
+    }
+    /// This app's executable, which the backends run as `… mcp --attach PORT`.
+    fn mcp_exe(&self) -> Option<std::path::PathBuf> {
         None
     }
 }
@@ -700,7 +730,7 @@ pub fn indicator_width(app: &mut FigApp, ui: &Ui) -> f32 {
 
 /// Who the pill names: the connected client, or the in-app panel's agent.
 fn pill_name(app: &FigApp, external: bool) -> String {
-    if external { app.ui.agents.client_name() } else { crate::agent_panel::BACKEND_NAME.to_string() }
+    if external { app.ui.agents.client_name() } else { app.ui.agent.pill_name() }
 }
 
 /// A pill in the tab strip while an agent is connected or the panel's agent is working: who it

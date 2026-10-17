@@ -10,7 +10,6 @@ status = "draft — needs native review"
 [ui]
 "Agent" = "Agente"
 "Ask the agent to design anything" = "Pídele al agente diseñar lo que quieras"
-"Claude Code was not found on this computer." = "No se encontró Claude Code en este ordenador."
 "Compatibility notes" = "Notas de compatibilidad"
 "Couldn't download the variables" = "No se pudieron descargar las variables"
 
@@ -852,6 +851,7 @@ status = "draft — needs native review"
 "Next or previous control in the focused region" = "Control siguiente o anterior de la región enfocada"
 "Next ready for dev" = "Siguiente listo para desarrollo"
 "Next size option" = "Siguiente opción de tamaño"
+"No agent backend was found on this computer." = "No se encontró ningún backend de agente en este ordenador."
 "No assets: no export settings, icons or images. Add export settings in the Design tab." = "No hay recursos: ni ajustes de exportación, ni iconos, ni imágenes. Añade ajustes de exportación en la pestaña Diseño."
 "No boolean variables fit here." = "Ninguna variable booleana encaja aquí."
 "No boolean variables yet. Create them in Local variables." = "Aún no hay variables booleanas. Créalas en Variables locales."
@@ -1376,6 +1376,7 @@ status = "draft — needs native review"
 "Swapped {n} assets" = { one = "{n} recurso intercambiado", other = "{n} recursos intercambiados" }
 "Swapped {n} assets; {missed} had no match and still use the old library" = { one = "{n} recurso intercambiado; {missed} sin coincidencia siguen usando la biblioteca anterior", other = "{n} recursos intercambiados; {missed} sin coincidencia siguen usando la biblioteca anterior" }
 "Sweep" = "Barrido"
+"Switch to {name}" = "Cambiar a {name}"
 "System" = "Sistema"
 "Tab / Shift+Tab" = "Tab / Shift+Tab"
 "Table" = "Tabla"
