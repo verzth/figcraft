@@ -1449,6 +1449,7 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "figcraft-agent",
  "figcraft-collab-net",
  "figcraft-engine",
  "figcraft-format",

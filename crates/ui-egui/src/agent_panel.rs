@@ -16,7 +16,11 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
 use egui::{Align2, Color32, CornerRadius, Key, Layout, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
-use figcraft_agent::{AgentEvent, Backend, ClaudeCodeCli, CodexCli, OpenCodeCli, Session, Turn};
+#[cfg(not(target_arch = "wasm32"))]
+use figcraft_agent::AnthropicApi;
+#[cfg(not(target_arch = "wasm32"))]
+use figcraft_agent::OpenAiApi;
+use figcraft_agent::{AgentEvent, ApiKeys, Backend, ClaudeCodeCli, CodexCli, OpenCodeCli, Session, Turn};
 
 use crate::FigApp;
 use crate::agent_models::{ModelChoice, Models, Route};
@@ -870,9 +874,9 @@ fn send_turn(app: &mut FigApp, ctx: &egui::Context) {
         Route::Selected(kind) => (kind, None),
         Route::Model { kind, id } => (kind, Some(id)),
     };
-    let Some(bin) = app.ui.agent.backends.iter().find(|b| b.kind == kind).map(|b| b.bin.clone()) else {
-        return refuse(app, active, tr("No agent backend was found on this computer.").to_string(), &original);
-    };
+    // The CLIs carry their executable; the API backends take their key from the prefs file.
+    let bin = app.ui.agent.backends.iter().find(|b| b.kind == kind).and_then(|b| b.bin.clone());
+    let keys = app.services.agents().and_then(|h| h.agent_keys()).unwrap_or_default();
     // What the agent sees: the typed message, then every attached file's text.
     let mut text = original.clone();
     if has_context {
@@ -888,7 +892,10 @@ fn send_turn(app: &mut FigApp, ctx: &egui::Context) {
     if chat.link.is_none() {
         let (tx_cmd, rx_cmd) = mpsc::channel();
         let (tx_ev, rx_ev) = mpsc::channel();
-        let built = build_backend(kind, bin, exe, port, model);
+        let built = match build_backend(kind, bin, exe, port, model, &keys) {
+            Ok(built) => built,
+            Err(why) => return refuse(app, active, why, &original),
+        };
         // The worker outlives this call: it needs its own clone of the context.
         let ctx = ctx.clone();
         std::thread::spawn(move || worker(built, resume, rx_cmd, tx_ev, ctx));
@@ -936,30 +943,85 @@ fn server(app: &mut FigApp) -> Result<(PathBuf, u16), String> {
 }
 
 /// The backend this conversation's worker runs, from what the host found on this computer.
-/// `model` pins the run to one model; `None` leaves the CLI's own default.
-fn build_backend(kind: BackendKind, bin: PathBuf, exe: PathBuf, port: u16, model: Option<String>) -> Box<dyn Backend> {
+/// `model` pins the run to one model; `None` leaves the backend's own default. The CLIs
+/// take the binary the scan found; the API kinds take the key from the prefs file.
+fn build_backend(
+    kind: BackendKind,
+    bin: Option<PathBuf>,
+    exe: PathBuf,
+    port: u16,
+    model: Option<String>,
+    keys: &ApiKeys,
+) -> Result<Box<dyn Backend>, String> {
+    let no_bin = || tr("No agent backend was found on this computer.").to_string();
     match kind {
         BackendKind::ClaudeCode => {
+            let bin = bin.ok_or_else(no_bin)?;
             let backend = ClaudeCodeCli::new(bin, exe, port);
-            Box::new(match model {
+            Ok(Box::new(match model {
                 Some(model) => backend.model(model),
                 None => backend,
-            })
+            }))
         }
         BackendKind::OpenCode => {
+            let bin = bin.ok_or_else(no_bin)?;
             let backend = OpenCodeCli::new(bin, exe, port);
-            Box::new(match model {
+            Ok(Box::new(match model {
                 Some(model) => backend.model(model),
                 None => backend,
-            })
+            }))
         }
         BackendKind::Codex => {
+            let bin = bin.ok_or_else(no_bin)?;
             let backend = CodexCli::new(bin, exe, port);
-            Box::new(match model {
+            Ok(Box::new(match model {
                 Some(model) => backend.model(model),
                 None => backend,
-            })
+            }))
         }
+        BackendKind::AnthropicApi | BackendKind::OpenAiApi => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                api_backend(kind, exe, port, model, keys)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = (exe, port, model, keys);
+                Err(tr("API keys run in the desktop app: a browser tab can't keep them.").to_string())
+            }
+        }
+    }
+}
+
+/// The direct-API backends: the key (and optional base URL) from the prefs file, the app
+/// itself reached over the same `mcp --attach` connection the CLIs use.
+#[cfg(not(target_arch = "wasm32"))]
+fn api_backend(kind: BackendKind, exe: PathBuf, port: u16, model: Option<String>, keys: &ApiKeys) -> Result<Box<dyn Backend>, String> {
+    let no_key = |provider: &str| trf("No {provider} API key is set for this chat.", &[("provider", &provider)]);
+    match kind {
+        BackendKind::AnthropicApi => {
+            let key = keys.anthropic.clone().filter(|k| !k.trim().is_empty()).ok_or_else(|| no_key("Anthropic"))?;
+            let mut backend = AnthropicApi::new(key, exe, port);
+            if let Some(base) = keys.anthropic_base.as_deref().filter(|b| !b.trim().is_empty()) {
+                backend = backend.base_url(base);
+            }
+            if let Some(model) = model {
+                backend = backend.model(model);
+            }
+            Ok(Box::new(backend))
+        }
+        BackendKind::OpenAiApi => {
+            let key = keys.openai.clone().filter(|k| !k.trim().is_empty()).ok_or_else(|| no_key("OpenAI"))?;
+            let mut backend = OpenAiApi::new(key, exe, port);
+            if let Some(base) = keys.openai_base.as_deref().filter(|b| !b.trim().is_empty()) {
+                backend = backend.base_url(base);
+            }
+            if let Some(model) = model {
+                backend = backend.model(model);
+            }
+            Ok(Box::new(backend))
+        }
+        _ => Err(tr("No agent backend was found on this computer.").to_string()),
     }
 }
 

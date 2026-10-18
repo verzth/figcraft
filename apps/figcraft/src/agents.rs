@@ -36,18 +36,30 @@ pub struct DesktopAgents {
     home: Option<PathBuf>,
     /// This app's executable, which the clients run as `… mcp --attach PORT`.
     exe: PathBuf,
+    /// The direct-API keys from the config folder (AgentKeys.json), loaded at startup.
+    keys: figcraft_agent::ApiKeys,
 }
 
 impl DesktopAgents {
     pub fn new(queue: Queue, ctx: CtxSlot) -> Self {
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("figcraft"));
-        Self { queue, ctx, server: None, error: None, home, exe }
+        let keys = crate::services::config_dir().map(|d| figcraft_agent::ApiKeys::load(&d.join(figcraft_agent::FILE_NAME))).unwrap_or_default();
+        Self { queue, ctx, server: None, error: None, home, exe, keys }
     }
 
     #[cfg(test)]
     fn with_home(home: &Path, exe: &Path) -> Self {
-        Self { queue: Arc::default(), ctx: Arc::default(), server: None, error: None, home: Some(home.to_path_buf()), exe: exe.to_path_buf() }
+        // The scratch home keeps its own keys empty: a test never reads the real keyring.
+        Self {
+            queue: Arc::default(),
+            ctx: Arc::default(),
+            server: None,
+            error: None,
+            home: Some(home.to_path_buf()),
+            exe: exe.to_path_buf(),
+            keys: figcraft_agent::ApiKeys::default(),
+        }
     }
 
     /// The command a client runs to reach this app on `port`.
@@ -196,19 +208,49 @@ impl AgentHost for DesktopAgents {
     }
 
     /// The Agent tab's backends, in the order the tab prefers them (empty when this
-    /// computer has none).
+    /// computer has none). The direct-API backends join the list only while the prefs file
+    /// holds their key — a key typed in Preferences ▸ AI agents shows up on the next scan.
     fn panel_backends(&mut self) -> Vec<PanelBackend> {
-        let Some(home) = self.home.as_deref() else { return Vec::new() };
-        let claude_extra = [home.join(".claude/local")];
-        [(BackendKind::ClaudeCode, "claude", &claude_extra[..]), (BackendKind::OpenCode, "opencode", &[][..]), (BackendKind::Codex, "codex", &[][..])]
-            .iter()
-            .filter_map(|(kind, cmd, extra)| find_command(home, cmd, extra).map(|bin| PanelBackend { kind: *kind, bin }))
-            .collect()
+        let mut found: Vec<PanelBackend> = Vec::new();
+        if let Some(home) = self.home.as_deref() {
+            let claude_extra = [home.join(".claude/local")];
+            found.extend(
+                [
+                    (BackendKind::ClaudeCode, "claude", &claude_extra[..]),
+                    (BackendKind::OpenCode, "opencode", &[][..]),
+                    (BackendKind::Codex, "codex", &[][..]),
+                ]
+                .iter()
+                .filter_map(|(kind, cmd, extra)| find_command(home, cmd, extra).map(|bin| PanelBackend { kind: *kind, bin: Some(bin) })),
+            );
+        }
+        if self.keys.anthropic.as_deref().is_some_and(|k| !k.trim().is_empty()) {
+            found.push(PanelBackend { kind: BackendKind::AnthropicApi, bin: None });
+        }
+        if self.keys.openai.as_deref().is_some_and(|k| !k.trim().is_empty()) {
+            found.push(PanelBackend { kind: BackendKind::OpenAiApi, bin: None });
+        }
+        found
     }
 
     /// This app's executable, which the backends run as `… mcp --attach PORT`.
     fn mcp_exe(&self) -> Option<PathBuf> {
         Some(self.exe.clone())
+    }
+
+    /// The direct-API keys from AgentKeys.json (loaded at startup).
+    fn agent_keys(&mut self) -> Option<figcraft_agent::ApiKeys> {
+        Some(self.keys.clone())
+    }
+
+    /// Write the keys to AgentKeys.json (atomically, owner-only) and keep them for the
+    /// backends this session.
+    fn set_agent_keys(&mut self, keys: figcraft_agent::ApiKeys) -> Result<(), String> {
+        let dir = crate::services::config_dir().ok_or_else(|| "the configuration folder wasn't found".to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        keys.save(&dir.join(figcraft_agent::FILE_NAME)).map_err(|e| e.to_string())?;
+        self.keys = keys;
+        Ok(())
     }
 }
 

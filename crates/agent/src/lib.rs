@@ -14,6 +14,8 @@ mod codex_cli;
 pub mod keys;
 #[cfg(not(target_arch = "wasm32"))]
 mod mcp_stdio;
+#[cfg(not(target_arch = "wasm32"))]
+mod openai_api;
 mod opencode_cli;
 mod pump;
 
@@ -30,6 +32,8 @@ mod live_tests;
 #[cfg(test)]
 mod mcp_stdio_tests;
 #[cfg(test)]
+mod openai_api_tests;
+#[cfg(test)]
 mod opencode_cli_tests;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,6 +41,8 @@ pub use anthropic_api::AnthropicApi;
 pub use claude_cli::{ClaudeCodeCli, SYSTEM_PROMPT_NOTE};
 pub use codex_cli::CodexCli;
 pub use keys::{ApiKeys, FILE_NAME};
+#[cfg(not(target_arch = "wasm32"))]
+pub use openai_api::OpenAiApi;
 pub use opencode_cli::OpenCodeCli;
 
 use std::sync::mpsc::{Receiver, Sender, channel};

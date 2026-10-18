@@ -75,14 +75,16 @@ const CODEX: &[(&str, &str)] = &[
 /// The picker's default — the model pen.dev's bar opens on; also OpenCode's runner for it.
 pub const CLAUDE_DEFAULT: usize = 7; // claude-sonnet-5-5
 
-/// Anthropic's models: Claude Code runs them, OpenCode too (`anthropic/…`).
+/// Anthropic's models: Claude Code runs them, the Anthropic API with a key from the prefs
+/// file, OpenCode too (`anthropic/…`).
 fn claude_runners() -> Vec<BackendKind> {
-    vec![BackendKind::ClaudeCode, BackendKind::OpenCode]
+    vec![BackendKind::ClaudeCode, BackendKind::AnthropicApi, BackendKind::OpenCode]
 }
 
-/// OpenAI's models: Codex runs them, OpenCode when it has the provider configured.
+/// OpenAI's models: Codex runs them, the OpenAI(-compatible) API with a key, OpenCode when
+/// it has the provider configured.
 fn codex_runners() -> Vec<BackendKind> {
-    vec![BackendKind::Codex, BackendKind::OpenCode]
+    vec![BackendKind::Codex, BackendKind::OpenAiApi, BackendKind::OpenCode]
 }
 
 /// Claude Code's models.
@@ -100,13 +102,18 @@ fn static_list(rows: &[(&str, &str)], provider: &str, runners: &[BackendKind]) -
 }
 
 /// OpenCode's list (`opencode models`: `provider/model` per line), parsed into rows. These
-/// run on OpenCode; Anthropic's also go to Claude Code, whose names are the same namespace.
+/// run on OpenCode; Anthropic's also go to Claude Code and the Anthropic API, OpenAI's to
+/// the OpenAI API — their names are the same namespace.
 pub fn from_opencode_list(raw: &str) -> Vec<ModelChoice> {
     raw.lines()
         .filter_map(|line| {
             let open = line.trim();
             let (prefix, id) = open.split_once('/')?;
-            let runners = if prefix == "anthropic" { claude_runners() } else { vec![BackendKind::OpenCode] };
+            let runners = match prefix {
+                "anthropic" => claude_runners(),
+                "openai" => vec![BackendKind::OpenAiApi, BackendKind::OpenCode],
+                _ => vec![BackendKind::OpenCode],
+            };
             Some(ModelChoice { id: id.to_string(), open: open.to_string(), label: prettify(id), provider: words(prefix), runners })
         })
         .collect()
@@ -234,15 +241,15 @@ impl Models {
     pub fn ensure(&mut self, backends: &[PanelBackend]) {
         if self.choices.is_empty() {
             self.choices = merge(Vec::new());
-            // pen.dev opens on Sonnet; a computer with only Codex starts on GPT — the first
-            // pick of what's actually here.
-            let claude_like = backends.iter().any(|b| matches!(b.kind, BackendKind::ClaudeCode | BackendKind::OpenCode));
-            let codex_here = backends.iter().any(|b| b.kind == BackendKind::Codex);
+            // pen.dev opens on Sonnet; a computer with only GPT backends starts on GPT —
+            // the first pick of what's actually here.
+            let claude_like = backends.iter().any(|b| matches!(b.kind, BackendKind::ClaudeCode | BackendKind::AnthropicApi | BackendKind::OpenCode));
+            let codex_here = backends.iter().any(|b| matches!(b.kind, BackendKind::Codex | BackendKind::OpenAiApi));
             self.picked = if !claude_like && codex_here { Some(CLAUDE.len()) } else { Some(CLAUDE_DEFAULT) };
         }
         if !self.started {
             self.started = true;
-            if let Some(bin) = backends.iter().find(|b| b.kind == BackendKind::OpenCode).map(|b| b.bin.clone()) {
+            if let Some(bin) = backends.iter().find(|b| b.kind == BackendKind::OpenCode).and_then(|b| b.bin.clone()) {
                 let (tx, rx) = mpsc::channel();
                 std::thread::spawn(move || {
                     let list = match std::process::Command::new(bin).arg("models").output() {

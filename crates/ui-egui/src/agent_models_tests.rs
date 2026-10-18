@@ -26,8 +26,9 @@ fn claude_offers_pen_devs_list_with_sonnet_picked() {
     );
     assert_eq!(models[CLAUDE_DEFAULT].id, "claude-sonnet-5-5");
     assert!(models.iter().all(|m| m.provider == "Anthropic"));
-    // Claude Code runs them; OpenCode takes the same names under `anthropic/…`.
-    assert!(models.iter().all(|m| m.runners == [BackendKind::ClaudeCode, BackendKind::OpenCode]));
+    // Claude Code runs them, else the Anthropic API with a key; OpenCode takes the same
+    // names under `anthropic/…`.
+    assert!(models.iter().all(|m| m.runners == [BackendKind::ClaudeCode, BackendKind::AnthropicApi, BackendKind::OpenCode]));
     assert_eq!(models[0].open, "anthropic/claude-fable-5-1");
 }
 
@@ -38,7 +39,9 @@ fn codex_defaults_to_the_models_page_recommendation() {
     assert_eq!(models[0].label, "GPT 6.1 Sol");
     assert!(models.iter().any(|m| m.id == "gpt-6-astra" && m.label == "GPT 6 Astra"));
     assert!(models.iter().all(|m| m.provider == "OpenAI"));
-    assert!(models.iter().all(|m| m.runners == [BackendKind::Codex, BackendKind::OpenCode]));
+    // Codex runs them, else the OpenAI(-compatible) API with a key; OpenCode when it has
+    // the provider configured.
+    assert!(models.iter().all(|m| m.runners == [BackendKind::Codex, BackendKind::OpenAiApi, BackendKind::OpenCode]));
     assert_eq!(models[0].open, "openai/gpt-6.1-sol");
 }
 
@@ -52,10 +55,13 @@ fn opencode_rows_read_like_pen_devs() {
     assert_eq!(rows[0].id, "claude-opus-4-8-fast");
     assert_eq!(rows[0].open, "anthropic/claude-opus-4-8-fast");
     assert_eq!(rows[0].provider, "Anthropic");
-    // Anthropic's names go to Claude Code too; the rest run on OpenCode.
-    assert_eq!(rows[0].runners, [BackendKind::ClaudeCode, BackendKind::OpenCode]);
+    // Anthropic's names go to Claude Code and the Anthropic API too; OpenAI's to the
+    // OpenAI API; the rest run on OpenCode alone.
+    assert_eq!(rows[0].runners, [BackendKind::ClaudeCode, BackendKind::AnthropicApi, BackendKind::OpenCode]);
     assert_eq!(rows[1].runners, [BackendKind::OpenCode]);
     assert_eq!(rows[2].provider, "MiniMax Coding Plan");
+    let openai = from_opencode_list("openai/gpt-6-mini\n");
+    assert_eq!(openai[0].runners, [BackendKind::OpenAiApi, BackendKind::OpenCode]);
 }
 
 #[test]
@@ -101,8 +107,8 @@ fn one_dropdown_lists_every_provider_with_the_curated_names_first() {
 fn the_default_model_runs_on_the_selected_backend_when_it_can() {
     let mut models = Models::default();
     let backends = vec![
-        PanelBackend { kind: BackendKind::ClaudeCode, bin: "/bin/claude".into() },
-        PanelBackend { kind: BackendKind::Codex, bin: "/bin/codex".into() },
+        PanelBackend { kind: BackendKind::ClaudeCode, bin: Some("/bin/claude".into()) },
+        PanelBackend { kind: BackendKind::Codex, bin: Some("/bin/codex".into()) },
     ];
     models.ensure(&backends);
     // Pen.dev's bar opens on Sonnet, and Claude Code is selected: it runs it.
@@ -111,7 +117,7 @@ fn the_default_model_runs_on_the_selected_backend_when_it_can() {
     // Codex selected, but a Claude model goes to the CLI that takes it — the model wins.
     assert_eq!(models.route(&backends, 1), Route::Model { kind: BackendKind::ClaudeCode, id: "claude-sonnet-5-5".into() });
     // This computer without any CLI for it: the starting default falls back quietly.
-    let codex_only = vec![PanelBackend { kind: BackendKind::Codex, bin: "/bin/codex".into() }];
+    let codex_only = vec![PanelBackend { kind: BackendKind::Codex, bin: Some("/bin/codex".into()) }];
     assert_eq!(models.route(&codex_only, 0), Route::Selected(BackendKind::Codex));
 }
 
@@ -119,8 +125,8 @@ fn the_default_model_runs_on_the_selected_backend_when_it_can() {
 fn a_picked_model_goes_to_a_backend_that_runs_it_or_says_so() {
     let mut models = Models::default();
     let backends = vec![
-        PanelBackend { kind: BackendKind::ClaudeCode, bin: "/bin/claude".into() },
-        PanelBackend { kind: BackendKind::OpenCode, bin: "/bin/opencode".into() },
+        PanelBackend { kind: BackendKind::ClaudeCode, bin: Some("/bin/claude".into()) },
+        PanelBackend { kind: BackendKind::OpenCode, bin: Some("/bin/opencode".into()) },
     ];
     models.ensure(&backends);
     // An OpenAI model: Codex is missing, so OpenCode runs it under `openai/…`.
@@ -130,7 +136,7 @@ fn a_picked_model_goes_to_a_backend_that_runs_it_or_says_so() {
     assert!(models.search.is_empty());
     assert_eq!(models.route(&backends, 0), Route::Model { kind: BackendKind::OpenCode, id: "openai/gpt-6.1-sol".into() });
     // Now a computer where nothing takes it: the hand-picked model says so by name.
-    let claude_only = vec![PanelBackend { kind: BackendKind::ClaudeCode, bin: "/bin/claude".into() }];
+    let claude_only = vec![PanelBackend { kind: BackendKind::ClaudeCode, bin: Some("/bin/claude".into()) }];
     assert_eq!(models.route(&claude_only, 0), Route::Unsupported("GPT 6.1 Sol".into()));
     // No backend at all.
     assert_eq!(models.route(&[], 0), Route::NoBackend);
@@ -139,7 +145,7 @@ fn a_picked_model_goes_to_a_backend_that_runs_it_or_says_so() {
 #[test]
 fn a_codex_only_computer_starts_on_gpt() {
     let mut models = Models::default();
-    let backends = vec![PanelBackend { kind: BackendKind::Codex, bin: "/bin/codex".into() }];
+    let backends = vec![PanelBackend { kind: BackendKind::Codex, bin: Some("/bin/codex".into()) }];
     models.ensure(&backends);
     assert_eq!(models.label(), "GPT 6.1 Sol");
     assert_eq!(models.route(&backends, 0), Route::Model { kind: BackendKind::Codex, id: "gpt-6.1-sol".into() });

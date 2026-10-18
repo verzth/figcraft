@@ -209,7 +209,7 @@ fn no_text_runs_past_the_panel() {
 #[test]
 fn with_a_backend_the_names_stay_inside_the_panel() {
     let mut u = tab();
-    u.app.ui.agent.backends = vec![crate::agents::PanelBackend { kind: crate::agents::BackendKind::ClaudeCode, bin: "claude".into() }];
+    u.app.ui.agent.backends = vec![crate::agents::PanelBackend { kind: crate::agents::BackendKind::ClaudeCode, bin: Some("claude".into()) }];
     // Plant the backend rather than scanning this machine: `resolved` makes the scan a no-op.
     u.app.ui.agent.resolved = true;
     let (painted, span) = panel_shapes(&mut u);

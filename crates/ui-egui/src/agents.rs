@@ -58,12 +58,18 @@ pub enum ClientState {
     Installed { same_port: bool },
 }
 
-/// Which agent CLI the Agent tab runs.
+/// Which agent backend the Agent tab runs: an installed CLI, or a provider API driven
+/// directly from the key in the local prefs file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BackendKind {
     ClaudeCode,
     OpenCode,
     Codex,
+    /// Anthropic's API, with the key from AgentKeys.json — no CLI needed.
+    AnthropicApi,
+    /// OpenAI's API, or any server that speaks the same protocol (the base URL is the
+    /// user's). Also driven from AgentKeys.json.
+    OpenAiApi,
 }
 
 impl BackendKind {
@@ -73,6 +79,8 @@ impl BackendKind {
             BackendKind::ClaudeCode => "Claude Code",
             BackendKind::OpenCode => "OpenCode",
             BackendKind::Codex => "Codex",
+            BackendKind::AnthropicApi => "Anthropic",
+            BackendKind::OpenAiApi => "OpenAI",
         }
     }
 
@@ -82,15 +90,24 @@ impl BackendKind {
             BackendKind::ClaudeCode => 0,
             BackendKind::OpenCode => 1,
             BackendKind::Codex => 2,
+            BackendKind::AnthropicApi => 3,
+            BackendKind::OpenAiApi => 4,
         }
+    }
+
+    /// True for the backends that talk to a provider API directly (they need a key from
+    /// the prefs file, not an executable).
+    pub fn is_api(self) -> bool {
+        matches!(self, BackendKind::AnthropicApi | BackendKind::OpenAiApi)
     }
 }
 
-/// One agent backend found on this computer: which CLI, and its executable.
+/// One agent backend found on this computer: which backend, and (for the CLIs) its
+/// executable — the API backends keep their key in the prefs file instead.
 #[derive(Clone, Debug)]
 pub struct PanelBackend {
     pub kind: BackendKind,
-    pub bin: std::path::PathBuf,
+    pub bin: Option<std::path::PathBuf>,
 }
 
 /// The app side of the AI agents tab (desktop only).
@@ -111,13 +128,23 @@ pub trait AgentHost {
     /// The settings to paste into any other MCP client.
     fn config_json(&self, port: u16) -> String;
     /// The Agent tab's backends, in the order the tab prefers them (empty when this
-    /// computer has none).
+    /// computer has none). The API backends join the list only when the prefs file holds
+    /// their key.
     fn panel_backends(&mut self) -> Vec<PanelBackend> {
         Vec::new()
     }
     /// This app's executable, which the backends run as `… mcp --attach PORT`.
     fn mcp_exe(&self) -> Option<std::path::PathBuf> {
         None
+    }
+    /// The direct-API keys from the local prefs file (the browser keeps none).
+    fn agent_keys(&mut self) -> Option<figcraft_agent::ApiKeys> {
+        None
+    }
+    /// Store the keys in the local prefs file; the API backends pick them up at once.
+    fn set_agent_keys(&mut self, keys: figcraft_agent::ApiKeys) -> Result<(), String> {
+        let _ = keys;
+        Ok(())
     }
 }
 
@@ -266,6 +293,8 @@ pub fn tab(app: &mut FigApp, ui: &mut Ui) {
     status_header(app, ui, &t, &status, now);
     ui.add_space(GAP);
     options(app, ui, &t, &status);
+    ui.add_space(GAP);
+    api_keys(app, ui, &t);
     ui.add_space(GAP);
     widgets::separator(ui);
     ui.add_space(GAP);
@@ -529,6 +558,80 @@ fn options(app: &mut FigApp, ui: &mut Ui, t: &Tokens, status: &ServerStatus) {
         };
         ui.label(RichText::new(hint).font(regular(12.0)).color(color));
     });
+}
+
+/// The direct-API keys: paste one and the Agent tab designs with that provider's models, no
+/// agent CLI installed. Saved to AgentKeys.json beside the preferences, owner-only — the
+/// browser, which keeps none, shows nothing here.
+fn api_keys(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    let Some(mut keys) = app.services.agents().and_then(|h| h.agent_keys()) else { return };
+    ui.spacing_mut().item_spacing.y = 4.0;
+    ui.label(RichText::new(tr("API keys")).font(semibold(13.0)).color(t.text));
+    text(
+        ui,
+        tr(
+            "Paste a key and the Agent tab runs that provider's models with no agent CLI installed. The keys stay on this computer, in a file only you can read.",
+        ),
+        regular(12.0),
+        t.text_secondary,
+    );
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.add_space(GAP);
+    let mut changed = false;
+    egui::Frame::NONE.fill(t.panel).stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(6)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        changed |= key_row(ui, t, "Anthropic", "sk-ant-…", "https://api.anthropic.com", &mut keys.anthropic, &mut keys.anthropic_base);
+        row_rule(ui, t);
+        changed |=
+            key_row(ui, t, "OpenAI", "sk-…", "https://api.openai.com (or any OpenAI-compatible server)", &mut keys.openai, &mut keys.openai_base);
+    });
+    if changed {
+        match app.services.agents().map(|h| h.set_agent_keys(keys)) {
+            Some(Ok(())) => {
+                // The backends list gains or loses the API entries on the next scan.
+                app.ui.agent.resolved = false;
+                app.toast(tr("API keys saved"));
+            }
+            Some(Err(e)) => app.toast(e),
+            None => {}
+        }
+    }
+}
+
+/// One provider's rows: its key (masked; committed on Enter or focus loss) and beneath it
+/// an optional endpoint, blank for the provider's default. `changed` says a row committed,
+/// so the caller saves once.
+fn key_row(ui: &mut Ui, t: &Tokens, provider: &str, key_hint: &str, base_hint: &str, key: &mut Option<String>, base: &mut Option<String>) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new(provider).font(regular(13.0)).color(t.text));
+        let shown = key.clone().unwrap_or_default();
+        if let Some(typed) = widgets::secret_field(ui, egui::Id::new(("agent_key", provider)), &shown, 240.0, key_hint) {
+            *key = (!typed.trim().is_empty()).then(|| typed.trim().to_string());
+            changed = true;
+        }
+        if shown.is_empty() {
+            ui.label(RichText::new(tr("Not set")).font(regular(12.0)).color(t.text_secondary));
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new(tr("Endpoint")).font(regular(12.0)).color(t.text_secondary));
+        let shown = base.clone().unwrap_or_default();
+        if let Some(typed) = widgets::text_field(ui, egui::Id::new(("agent_base", provider)), &shown, 240.0, base_hint) {
+            *base = (!typed.trim().is_empty()).then(|| typed.trim().to_string());
+            changed = true;
+        }
+        if !shown.is_empty() && widgets::button(ui, tr("Use default"), false, true).clicked() {
+            *base = None;
+            changed = true;
+        }
+    });
+    changed
 }
 
 /// The clients, read again only when the tab wasn't shown in the previous pass (it just opened),

@@ -28,22 +28,36 @@ A document without a file yet isn't saved; the first change tells the agent, onc
 ## The Agent tab
 
 The app also runs an agent itself: the **Agent** tab in the left rail (below File) is a chat with
-Claude Code, opencode or codex, which designs in the open document through this same server
+Claude Code, opencode or codex — or, with an API key, Anthropic's or OpenAI's API driven directly
+— which designs in the open document through this same server
 (`figcraft mcp --attach
 <port>`, with a throwaway `--mcp-config` file per turn — your own Claude settings are never
-touched). Ask for anything; each tool call lands on the canvas as you watch and gets its own row
+touched; the API backends run the same attach client behind the scenes). Ask for anything; each
+tool call lands on the canvas as you watch and gets its own row
 in the transcript, and the agent's prose streams in above them. Enter sends a message, Shift+Enter
 breaks a line, Stop ends the turn (the conversation resumes where it stopped). It needs one of the
-backends installed (`claude`, `opencode` or `codex`).
+backends: an installed CLI (`claude`, `opencode` or `codex`), or an API key pasted into
+Preferences ▸ AI agents.
 
-The input box at the bottom holds the controls: which CLI runs the turns (its name on the left,
+The input box at the bottom holds the controls: which backend runs the turns (its name on the left,
 a chevron to cycle when this computer has more than one) and which model it runs (a picker over
-one merged list of Claude, Codex and OpenCode models, which routes each turn to a backend that
-can run it). Above it, *New chat* starts over and the session dropdown opens the chat history —
+one merged list of Claude, Codex and OpenAI models, which routes each turn to a backend that
+can run it — a Claude model goes to `claude` when it is installed, else to the Anthropic API when
+a key is set). Above it, *New chat* starts over and the session dropdown opens the chat history —
 today's, the previous week's, older — kept in the app's config folder (`AgentSessions.json`)
 and restored on the next launch, each conversation with its session id so it resumes where it
 stopped. Clearing the history needs a second click. Drop a text file on the panel and it rides
-along with the next message. API-key backends are planned.
+along with the next message.
+
+The API backends keep their key in `AgentKeys.json`, beside `AgentSessions.json` in the config
+folder, written atomically with owner-only permissions and never shown on screen once entered —
+Preferences ▸ AI agents is where you paste one, and both an Anthropic key (`sk-ant-…`) and an
+OpenAI-compatible key are accepted. The OpenAI endpoint defaults to `api.openai.com`; its
+*Endpoint* field points at any server that speaks the same protocol (OpenRouter, a regional
+proxy, a local Ollama), and a trailing `/v1` in the base URL is kept as-is. A model list entry
+the API cannot run fails the turn with the API's own message rather than silently switching
+models, and each turn's tool loop is capped so a runaway request stops instead of running all
+day.
 
 Attached calls are never automatically replayed after a transport failure: the app may have
 applied the request before its reply was lost. The error reports that the operation may have

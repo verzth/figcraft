@@ -425,6 +425,63 @@ pub fn text_field_named(ui: &mut Ui, id: Id, value: &str, width: f32, name: &str
     text_field_in(ui, id, value, rect, "", name)
 }
 
+/// [`text_field`] for a secret (an API key): the value is never on screen — dots while it
+/// has one, masked again as it is typed. Commits on Enter / focus loss like the others.
+pub fn secret_field(ui: &mut Ui, id: Id, value: &str, width: f32, placeholder: &str) -> Option<String> {
+    let t = Tokens::get(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
+    let editing_id = id.with("editing");
+    let mut editing: Option<String> = ui.data(|d| d.get_temp(editing_id));
+    let resp = ui.interact(rect, id.with("click"), Sense::click());
+    a11y::text(&resp, placeholder, "");
+    ui.painter().rect_filled(rect, CornerRadius::same(5), t.field);
+    if editing.is_some() {
+        ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, t.accent), StrokeKind::Inside);
+    } else if resp.hovered() {
+        ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, t.field_hover_border), StrokeKind::Inside);
+    }
+    let started = editing.is_none() && resp.clicked();
+    if started {
+        editing = Some(value.to_string());
+        ui.memory_mut(|m| m.request_focus(id.with("te")));
+        select_all_next(ui, id.with("te"));
+    }
+    let mut out = None;
+    match editing {
+        Some(mut text) => {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 4.0))));
+            let r = child.add(
+                egui::TextEdit::singleline(&mut text)
+                    .id(id.with("te"))
+                    .password(true)
+                    .frame(egui::Frame::NONE)
+                    .font(regular(11.0))
+                    .hint_text(egui::RichText::new(placeholder).font(regular(11.0)).color(t.text_tertiary))
+                    .desired_width(rect.width() - 16.0),
+            );
+            a11y::own_focus(&r);
+            keep_focus(&r, started);
+            let enter = !started && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc {
+                ui.data_mut(|d| d.remove::<String>(editing_id));
+            } else if r.lost_focus() || enter {
+                out = Some(text);
+                ui.data_mut(|d| d.remove::<String>(editing_id));
+            } else {
+                ui.data_mut(|d| d.insert_temp(editing_id, text));
+            }
+        }
+        None => {
+            // Dots when there is a key: even at rest the secret stays off screen.
+            let (s, col) = if value.is_empty() { (placeholder, t.text_tertiary) } else { ("••••••••", t.text) };
+            let painter = ui.painter().with_clip_rect(rect.shrink2(vec2(8.0, 0.0)));
+            painter.text(pos2(rect.min.x + 8.0, rect.center().y), Align2::LEFT_CENTER, s, regular(11.0), col);
+        }
+    }
+    out
+}
+
 /// A multi-line text field across the panel (descriptions, notes) that commits when it loses
 /// focus: returns the new text then, when it changed. The draft lives only while it has focus.
 pub fn multiline_field(ui: &mut Ui, id: Id, value: &str, hint: &str, rows: usize) -> Option<String> {
