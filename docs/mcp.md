@@ -34,9 +34,16 @@ Claude Code, opencode or codex, which designs in the open document through this 
 touched). Ask for anything; each tool call lands on the canvas as you watch and gets its own row
 in the transcript, and the agent's prose streams in above them. Enter sends a message, Shift+Enter
 breaks a line, Stop ends the turn (the conversation resumes where it stopped). It needs one of the
-backends installed (`claude`, `opencode` or `codex`); the dropdown under the chat picks the
-backend and the model, and the chat history is kept in the app's config folder
-(`AgentSessions.json`) and restored on the next launch. API-key backends are planned.
+backends installed (`claude`, `opencode` or `codex`).
+
+The input box at the bottom holds the controls: which CLI runs the turns (its name on the left,
+a chevron to cycle when this computer has more than one) and which model it runs (a picker over
+one merged list of Claude, Codex and OpenCode models, which routes each turn to a backend that
+can run it). Above it, *New chat* starts over and the session dropdown opens the chat history —
+today's, the previous week's, older — kept in the app's config folder (`AgentSessions.json`)
+and restored on the next launch, each conversation with its session id so it resumes where it
+stopped. Clearing the history needs a second click. Drop a text file on the panel and it rides
+along with the next message. API-key backends are planned.
 
 Attached calls are never automatically replayed after a transport failure: the app may have
 applied the request before its reply was lost. The error reports that the operation may have
