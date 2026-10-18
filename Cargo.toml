@@ -79,6 +79,11 @@ rfd = "0.17"
 arboard = { version = "3.6", default-features = false }
 webbrowser = "1"
 
+# the direct-API agent backends (Anthropic, OpenAI-compatible): blocking HTTP with rustls. The
+# agent crate target-gates it to desktop — rustls/ring has no web build, and the browser build
+# drives the app through its own channel instead.
+ureq = { version = "3", features = ["json"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

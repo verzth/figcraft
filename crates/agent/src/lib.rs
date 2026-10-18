@@ -7,22 +7,36 @@
 //! agents set up in Preferences ▸ AI agents.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+#[cfg(not(target_arch = "wasm32"))]
+mod anthropic_api;
 mod claude_cli;
 mod codex_cli;
+pub mod keys;
+#[cfg(not(target_arch = "wasm32"))]
+mod mcp_stdio;
 mod opencode_cli;
 mod pump;
 
+#[cfg(test)]
+mod anthropic_api_tests;
 #[cfg(test)]
 mod claude_cli_tests;
 #[cfg(test)]
 mod codex_cli_tests;
 #[cfg(test)]
+mod keys_tests;
+#[cfg(test)]
 mod live_tests;
+#[cfg(test)]
+mod mcp_stdio_tests;
 #[cfg(test)]
 mod opencode_cli_tests;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use anthropic_api::AnthropicApi;
 pub use claude_cli::{ClaudeCodeCli, SYSTEM_PROMPT_NOTE};
 pub use codex_cli::CodexCli;
+pub use keys::{ApiKeys, FILE_NAME};
 pub use opencode_cli::OpenCodeCli;
 
 use std::sync::mpsc::{Receiver, Sender, channel};
