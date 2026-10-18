@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde_json::Value;
 
 use crate::claude_cli::SERVER_NAME;
-use crate::pump::{Pump, line160, num};
+use crate::pump::{Pump, line160, num, result_text};
 use crate::{AgentError, AgentEvent, Backend, Turn};
 
 /// OpenAI's Codex CLI, driven headlessly.
@@ -209,9 +209,16 @@ impl Parser {
                     }
                 } else {
                     self.started.remove(&id);
-                    let ok = item["status"].as_str() != Some("failed");
-                    let raw = item["output"].as_str().unwrap_or_default();
-                    out.push(AgentEvent::ToolEnd { name, ok, summary: line160(raw) });
+                    let ok = item["status"].as_str() != Some("failed") && item["error"].is_null();
+                    // The call's answer: today it arrives as MCP content under `result`
+                    // (`result.content` holds the text), older builds as a plain string
+                    // under `output`.
+                    let raw = match &item["result"] {
+                        Value::Null => item["output"].as_str().unwrap_or_default().to_string(),
+                        Value::String(s) => s.clone(),
+                        other => result_text(&other["content"]),
+                    };
+                    out.push(AgentEvent::ToolEnd { name, ok, summary: line160(&raw) });
                 }
             }
             Some("command_execution") => {

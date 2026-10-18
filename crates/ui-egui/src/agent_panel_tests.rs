@@ -3,7 +3,7 @@
 
 use figcraft_agent::AgentEvent;
 
-use crate::agent_panel::{Chat, Row, apply, fmt_tokens, one_line};
+use crate::agent_panel::{Chat, Row, apply, fmt_tokens, one_line, short_tool_name};
 use crate::agents::BackendKind;
 use crate::i18n::tr;
 
@@ -96,6 +96,16 @@ fn arguments_and_counts_stay_compact() {
     assert_eq!(fmt_tokens(999), "999");
     assert_eq!(fmt_tokens(1234), "1.2k");
     assert_eq!(fmt_tokens(12_345), "12k");
+}
+
+#[test]
+fn a_tool_row_calls_the_tool_by_its_bare_name() {
+    // The agent CLIs name a tool four ways (Codex and OpenCode prefix the server); the row
+    // shows the one the user acts on.
+    assert_eq!(short_tool_name("mcp__figcraft-app__create_node"), "create_node");
+    assert_eq!(short_tool_name("figcraft-app.create_node"), "create_node");
+    assert_eq!(short_tool_name("figcraft.build_layout"), "build_layout");
+    assert_eq!(short_tool_name("create_node"), "create_node");
 }
 
 /// The history file's contract: a whole conversation survives the round trip — session id,

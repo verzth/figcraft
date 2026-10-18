@@ -70,6 +70,34 @@ fn a_failed_turn_says_why_and_a_failed_tool_marks_its_row() {
     );
 }
 
+/// The real `codex exec --json`, captured against a live app: a call's answer is MCP
+/// content under `result` (`output` is null), arguments are a JSON object rather than a
+/// string, and an item carries `error`/`status` fields the row must respect. Regression
+/// for reading `output` alone, which live Codex never fills for an MCP call — the panel
+/// then showed every result row empty.
+#[test]
+fn a_real_codex_call_reports_its_mcp_result_text() {
+    let mut p = Parser::default();
+    let got = events(
+        &mut p,
+        &[
+            r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"figcraft-app","tool":"create_node","arguments":{"type":"rectangle","name":"probe","x":40,"y":40,"width":120,"height":80},"result":null,"error":null,"status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"figcraft-app","tool":"create_node","arguments":{"type":"rectangle","name":"probe"},"result":{"content":[{"type":"text","text":"{\n  \"id\": 4,\n  \"node\": {\"name\": \"probe\"}\n}"}],"structured_content":null},"error":null,"status":"completed"}}"#,
+        ],
+    );
+    assert_eq!(
+        got,
+        vec![
+            AgentEvent::ToolStart {
+                name: "figcraft-app.create_node".into(),
+                // Object arguments round-trip through JSON, so the keys come back sorted.
+                args: r#"{"height":80,"name":"probe","type":"rectangle","width":120,"x":40,"y":40}"#.into()
+            },
+            AgentEvent::ToolEnd { name: "figcraft-app.create_node".into(), ok: true, summary: r#"{ "id": 4, "node": {"name": "probe"} }"#.into() },
+        ]
+    );
+}
+
 #[cfg(unix)]
 mod spawn {
     use super::*;
@@ -189,5 +217,28 @@ mod spawn {
         println!("{got:#?}");
         assert!(got.iter().any(|e| matches!(e, AgentEvent::Done { .. })), "{got:?}");
         assert!(got.iter().any(|e| matches!(e, AgentEvent::Session(_))), "{got:?}");
+    }
+
+    /// The whole loop against a live app: the real `codex` designs on the canvas of the
+    /// FigCraft it is attached to, through `figcraft-cli mcp --attach`. Run by hand with
+    /// the app up, never in CI:
+    /// `FIGCRAFT_TEST_PORT=<control port> cargo test -p figcraft-agent -- --ignored live_codex_designs --nocapture`
+    #[ignore = "needs a running app, the real codex CLI and an account"]
+    #[test]
+    fn live_codex_designs_on_the_attached_canvas() {
+        let Some(port) = crate::live_tests::live_port() else { return };
+        let mut session = Session::new(Box::new(CodexCli::new("codex", "figcraft-cli", port)));
+        session.send(&Turn { text: crate::live_tests::live_design_prompt("codex"), attachments: Vec::new() }).unwrap();
+        let got = collect_until_done(&session);
+        println!("{got:#?}");
+        assert!(got.iter().any(|e| matches!(e, AgentEvent::Done { .. })), "{got:?}");
+        let tools: Vec<&str> = got
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStart { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!tools.is_empty(), "no MCP tool was called: {got:?}");
     }
 }

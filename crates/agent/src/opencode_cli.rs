@@ -225,29 +225,78 @@ impl Parser {
 
     fn tool(&mut self, part: &Value, out: &mut Vec<AgentEvent>) {
         let id = part["id"].as_str().unwrap_or_default().to_string();
-        let name = part["tool"].as_str().unwrap_or("tool").to_string();
         let state = &part["state"];
         let status = state["status"].as_str().unwrap_or_default();
         match status {
             "completed" | "error" | "failed" => {
-                self.started.remove(&id);
-                let ok = status == "completed";
-                let raw = match (&state["output"], &state["error"]) {
-                    (Value::String(s), _) => s.clone(),
-                    (_, Value::String(s)) => s.clone(),
-                    (other, _) if !other.is_null() => other.to_string(),
-                    (_, other) => other.to_string(),
-                };
-                out.push(AgentEvent::ToolEnd { name, ok, summary: line160(&raw) });
+                // A quick call can arrive already completed, with no running event before
+                // it — the row still needs its start line for the result to land on.
+                let calls = inner_calls(part);
+                if !self.started.remove(&id) {
+                    for (name, args, _) in &calls {
+                        out.push(AgentEvent::ToolStart { name: name.clone(), args: args.clone() });
+                    }
+                }
+                let summary = line160(&raw_result(state));
+                for (name, _, call_ok) in calls {
+                    // A sandbox can wrap several calls; each carries its own outcome, and
+                    // the part's alone would hide one failing among succeeding ones.
+                    let ok = status == "completed" && call_ok.unwrap_or(true);
+                    out.push(AgentEvent::ToolEnd { name, ok, summary: summary.clone() });
+                }
             }
             _ => {
                 // pending / running: one row per call, however often it is re-sent.
                 if self.started.insert(id) {
-                    let input = &state["input"];
-                    let args = if input.is_null() { String::new() } else { input.to_string() };
-                    out.push(AgentEvent::ToolStart { name, args });
+                    for (name, args, _) in inner_calls(part) {
+                        out.push(AgentEvent::ToolStart { name, args });
+                    }
                 }
             }
         }
+    }
+}
+
+/// The tool calls one part stands for: name, arguments, and the call's own success when it
+/// recorded one. OpenCode's `execute` sandbox runs every call inside the part and records
+/// each in `state.metadata.metadata.toolCalls` — a directly invoked tool instead names
+/// itself on the part. Captured from a real `opencode run --format json` design turn, where
+/// all three calls of a turn were `execute` wrappers.
+fn inner_calls(part: &Value) -> Vec<(String, String, Option<bool>)> {
+    let recorded = &part["state"]["metadata"]["metadata"]["toolCalls"];
+    let mut calls: Vec<(String, String, Option<bool>)> = recorded
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|c| {
+                    let name = c["tool"].as_str().unwrap_or("tool").to_string();
+                    let args = match &c["input"] {
+                        Value::Null => String::new(),
+                        other => other.to_string(),
+                    };
+                    let ok = c["status"].as_str().map(|status| status == "completed");
+                    (name, args, ok)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if calls.is_empty() {
+        let name = part["tool"].as_str().unwrap_or("tool").to_string();
+        let args = match &part["state"]["input"] {
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        calls.push((name, args, None));
+    }
+    calls
+}
+
+/// A finished part's result text: the output when it holds one, else the error.
+fn raw_result(state: &Value) -> String {
+    match (&state["output"], &state["error"]) {
+        (Value::String(s), _) => s.clone(),
+        (_, Value::String(s)) => s.clone(),
+        (other, _) if !other.is_null() => other.to_string(),
+        (_, other) => other.to_string(),
     }
 }

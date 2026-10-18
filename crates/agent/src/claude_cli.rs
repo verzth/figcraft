@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
 
+use crate::pump::{line160, result_text};
 use crate::{AgentError, AgentEvent, Backend, Turn};
 
 /// The MCP server entry the agent CLI talks to; matches Preferences ▸ AI agents.
@@ -35,6 +36,10 @@ pub struct ClaudeCodeCli {
     session: Arc<Mutex<Option<String>>>,
     /// The temp dir holding this app's `mcp.json`.
     config_dir: PathBuf,
+    /// What the installed CLI said it accepts (`--strict-mcp-config`, `--tools`), read from
+    /// `--help` once per session. An unknown flag is a hard error, so a CLI that doesn't
+    /// list a switch never receives it.
+    supports: Arc<Mutex<Option<(bool, bool)>>>,
     tx: Option<Sender<AgentEvent>>,
     child: Arc<Mutex<Option<Child>>>,
     running: Arc<AtomicBool>,
@@ -43,6 +48,18 @@ pub struct ClaudeCodeCli {
 
 /// Distinguishes one session's temp config dir from the next in the same process.
 static NEXT_CONFIG_DIR: AtomicU64 = AtomicU64::new(0);
+
+/// The two switches worth passing only to a CLI that lists them, read from its `--help`
+/// (a sixtieth of a second, and only before a session's first turn). Help lands on either
+/// stream depending on the CLI, so both count.
+fn probe_support(bin: &Path) -> (bool, bool) {
+    let Ok(out) = Command::new(bin).arg("--help").stdout(Stdio::piped()).stderr(Stdio::piped()).output() else {
+        return (false, false);
+    };
+    let mut help = String::from_utf8_lossy(&out.stdout).into_owned();
+    help.push_str(&String::from_utf8_lossy(&out.stderr));
+    (help.contains("--strict-mcp-config"), help.contains("--tools"))
+}
 
 impl ClaudeCodeCli {
     /// `bin` is the `claude` executable, `figcraft_cli` the one serving `mcp --attach`,
@@ -56,6 +73,7 @@ impl ClaudeCodeCli {
             model: None,
             session: Arc::new(Mutex::new(None)),
             config_dir: std::env::temp_dir().join(format!("figcraft-agent-mcp-{}-{serial}", std::process::id())),
+            supports: Arc::new(Mutex::new(None)),
             tx: None,
             child: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
@@ -92,7 +110,23 @@ impl ClaudeCodeCli {
         Ok(path)
     }
 
+    /// The installed CLI's switches, probed once per session — before the first turn runs,
+    /// on the worker thread that spawns the process (never the UI's).
+    fn supports(&self) -> (bool, bool) {
+        let mut slot = self.supports.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.is_none() {
+            // The fake CLIs in the tests answer `--help` with their transcript, so nothing
+            // they say lists a switch: they run the plain turn, exactly like an old CLI.
+            *slot = Some(probe_support(&self.bin));
+        }
+        slot.unwrap_or((false, false))
+    }
+
     fn command(&self, prompt: &str, mcp_config: &Path) -> Command {
+        // An unknown flag is a hard `error: unknown option` exit, so each switch is passed
+        // only to a CLI whose `--help` listed it; a CLI too old gets the plain turn, which
+        // works everywhere.
+        let (strict, tools) = self.supports();
         let mut cmd = Command::new(&self.bin);
         cmd.arg("--print")
             .arg("--output-format")
@@ -100,11 +134,19 @@ impl ClaudeCodeCli {
             .arg("--verbose")
             .arg("--include-partial-messages")
             .arg("--mcp-config")
-            .arg(mcp_config)
-            .arg("--allowedTools")
-            .arg(format!("mcp__{SERVER_NAME}__*"))
-            .arg("--append-system-prompt")
-            .arg(SYSTEM_PROMPT_NOTE);
+            .arg(mcp_config);
+        if strict {
+            // Only this turn's server: the user's own MCP setup (which can hold hundreds
+            // of tools) never enters the turn.
+            cmd.arg("--strict-mcp-config");
+        }
+        if tools {
+            // No built-in tools either — the agent designs here and touches nothing else
+            // on this computer. Empty also spares it the tool-lookup round trip the CLI
+            // makes when many tools are only deferred.
+            cmd.arg("--tools").arg("");
+        }
+        cmd.arg("--allowedTools").arg(format!("mcp__{SERVER_NAME}__*")).arg("--append-system-prompt").arg(SYSTEM_PROMPT_NOTE);
         if let Some(model) = &self.model {
             cmd.arg("--model").arg(model);
         }
@@ -215,8 +257,11 @@ impl Drop for ClaudeCodeCli {
 /// does not know (ignored), which is what keeps a CLI upgrade from breaking the panel.
 #[derive(Default)]
 pub(crate) struct Parser {
-    /// `tool_use_id` → (tool name, streamed argument JSON), until its block stops.
-    pending: BTreeMap<String, (String, String)>,
+    /// Block index → (`tool_use_id`, tool name, streamed argument JSON), until the block
+    /// stops. The stream numbers content blocks per message and repeats only the index in
+    /// the delta and stop events — the `tool_use_id` they carry in some shapes is not
+    /// dependable, so the index is what ties the three together.
+    pending: BTreeMap<u64, (String, String, String)>,
     /// `tool_use_id` → tool name, for the tool results that follow.
     tools: BTreeMap<String, String>,
 }
@@ -256,34 +301,41 @@ impl Parser {
         let kind = event["type"].as_str().unwrap_or_default();
         match kind {
             "content_block_delta" => {
-                if event["delta"]["type"] == "text_delta"
-                    && let Some(text) = event["delta"]["text"].as_str()
-                    && !text.is_empty()
-                {
-                    out.push(AgentEvent::Text(text.to_string()));
+                let delta = &event["delta"];
+                match delta["type"].as_str() {
+                    // Text streams as its own block; the complete assistant message below
+                    // repeats it and is skipped.
+                    Some("text_delta") => {
+                        if let Some(text) = delta["text"].as_str()
+                            && !text.is_empty()
+                        {
+                            out.push(AgentEvent::Text(text.to_string()));
+                        }
+                    }
+                    // A tool call's arguments stream into the block its index names.
+                    Some("input_json_delta") => {
+                        if let (Some(index), Some(part)) = (index(event), delta["partial_json"].as_str())
+                            && let Some((_, _, args)) = self.pending.get_mut(&index)
+                        {
+                            args.push_str(part);
+                        }
+                    }
+                    _ => {}
                 }
             }
             "content_block_start" => {
                 let block = &event["content_block"];
                 if block["type"] == "tool_use"
-                    && let (Some(id), Some(name)) = (block["id"].as_str(), block["name"].as_str())
+                    && let (Some(index), Some(id), Some(name)) = (index(event), block["id"].as_str(), block["name"].as_str())
                 {
-                    self.pending.insert(id.to_string(), (name.to_string(), String::new()));
-                }
-            }
-            "input_json_delta" => {
-                if let Some(id) = event["tool_use_id"].as_str()
-                    && let Some((_, args)) = self.pending.get_mut(id)
-                    && let Some(part) = event["partial_json"].as_str()
-                {
-                    args.push_str(part);
+                    self.pending.insert(index, (id.to_string(), name.to_string(), String::new()));
                 }
             }
             "content_block_stop" => {
-                if let Some(id) = event["tool_use_id"].as_str()
-                    && let Some((name, args)) = self.pending.remove(id)
+                if let Some(index) = index(event)
+                    && let Some((id, name, args)) = self.pending.remove(&index)
                 {
-                    self.tools.insert(id.to_string(), name.clone());
+                    self.tools.insert(id, name.clone());
                     // An empty `input` streams no argument deltas: the call is `{}`.
                     let args = if args.is_empty() { "{}".into() } else { args };
                     out.push(AgentEvent::ToolStart { name, args });
@@ -310,19 +362,12 @@ fn num(v: &Value) -> Option<u64> {
     v.as_u64().or_else(|| v.as_f64().map(|f| f as u64))
 }
 
+/// The content-block index a stream event belongs to.
+fn index(event: &Value) -> Option<u64> {
+    num(&event["index"])
+}
+
 /// The tool result's first text, collapsed to one trimmed line for the panel's tool row.
 fn summary(content: &Value) -> String {
-    let text = match content {
-        Value::String(s) => s.clone(),
-        Value::Array(items) => items.iter().find_map(|b| b["text"].as_str()).unwrap_or_default().to_string(),
-        _ => String::new(),
-    };
-    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
-    let trimmed = line.trim();
-    if trimmed.chars().count() > 160 {
-        let cut: String = trimmed.chars().take(157).collect();
-        format!("{cut}…")
-    } else {
-        trimmed.to_string()
-    }
+    line160(&result_text(content))
 }

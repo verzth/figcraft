@@ -18,9 +18,9 @@ fn init_text_tool_result_and_result_map_in_order() {
             r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Saya "}}}"#,
             r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"membuat frame."}}}"#,
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"figcraft.build_layout","input":{}}}}"#,
-            r#"{"type":"stream_event","event":{"type":"input_json_delta","tool_use_id":"toolu_1","partial_json":"{\"frame\":"}}"#,
-            r#"{"type":"stream_event","event":{"type":"input_json_delta","tool_use_id":"toolu_1","partial_json":"100}"}}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1,"tool_use_id":"toolu_1"}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"frame\":"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"100}"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#,
             r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"Saya membuat frame."},{"type":"tool_use","id":"toolu_1","name":"figcraft.build_layout","input":{"frame":100}}]}}"#,
             r#"{"type":"user","message":{"id":"msg_2","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"built frame 100\n2 children","is_error":false}]}}"#,
             r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1234,"usage":{"input_tokens":10,"output_tokens":20},"session_id":"sess-1"}"#,
@@ -46,7 +46,7 @@ fn init_text_tool_result_and_result_map_in_order() {
         &mut Parser::default(),
         &[
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t","name":"n","input":{}}}}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1,"tool_use_id":"t"}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#,
         ],
     );
     assert_eq!(flush, vec![AgentEvent::ToolStart { name: "n".into(), args: "{}".into() }]);
@@ -59,10 +59,10 @@ fn a_tool_that_failed_reports_its_error_and_keeps_later_results_working() {
         &mut p,
         &[
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"a","name":"figcraft.check_layout","input":{}}}}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0,"tool_use_id":"a"}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","content":[{"type":"text","text":"no frame selected"}],"is_error":true}]}}"#,
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"b","name":"figcraft.inspect_document","input":{}}}}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":2,"tool_use_id":"b"}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":2}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","content":"ok"}]}}"#,
         ],
     );
@@ -112,6 +112,54 @@ fn long_summaries_are_cut_to_one_line() {
     let AgentEvent::ToolEnd { summary, .. } = &got[0] else { panic!("expected ToolEnd") };
     assert_eq!(summary.chars().count(), 158, "157 cut characters plus the ellipsis");
     assert!(!summary.contains('\n'));
+}
+
+/// The real `claude` stream, captured against a live app (`--include-partial-messages`):
+/// every delta nests under `content_block_delta` and repeats only the block *index*, the
+/// stop carries the index alone, and the CLI's own deferred-tool lookup (ToolSearch) runs
+/// as a first tool block whose index the next message reuses. Regression for the parser
+/// reading `tool_use_id` off the delta and stop events, which live streams never send —
+/// the panel then lost the call rows and named every result "tool".
+#[test]
+fn a_real_stream_tools_are_named_and_never_collide_across_messages() {
+    let mut p = Parser::default();
+    let got = events(
+        &mut p,
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"1dc88bbd","model":"claude-sonnet-5-5"}"#,
+            // Message one: the CLI's own ToolSearch block, index 0.
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01FY","name":"ToolSearch","input":{},"caller":{"type":"direct"}}},"session_id":"1dc88bbd"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\": \"select:mcp__figcraft-app__create_node\", \"max_results\": 1}"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"1dc88bbd"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01FY","content":[{"type":"tool_reference","tool_name":"mcp__figcraft-app__create_node"}]}]}}"#,
+            // Message two: the real call, index 0 again — a fresh message restarts the count.
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01G9","name":"mcp__figcraft-app__create_node","input":{},"caller":{"type":"direct"}}},"session_id":"1dc88bbd"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"type\": \"rectangle\", \"name\": \"probe\"}"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"1dc88bbd"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01G9","type":"tool_result","content":[{"type":"text","text":"{\n  \"id\": 4,\n  \"node\": {\"name\": \"probe\"}\n}"}]}]}}"#,
+            r#"{"type":"result","stop_reason":"end_turn","subtype":"success","is_error":false,"usage":{"input_tokens":6,"output_tokens":294},"session_id":"1dc88bbd"}"#,
+        ],
+    );
+    assert_eq!(
+        got,
+        vec![
+            AgentEvent::Session("1dc88bbd".into()),
+            AgentEvent::ToolStart {
+                name: "ToolSearch".into(),
+                args: r#"{"query": "select:mcp__figcraft-app__create_node", "max_results": 1}"#.into()
+            },
+            AgentEvent::ToolEnd { name: "ToolSearch".into(), ok: true, summary: String::new() },
+            AgentEvent::ToolStart { name: "mcp__figcraft-app__create_node".into(), args: r#"{"type": "rectangle", "name": "probe"}"#.into() },
+            AgentEvent::ToolEnd {
+                name: "mcp__figcraft-app__create_node".into(),
+                ok: true,
+                summary: r#"{ "id": 4, "node": {"name": "probe"} }"#.into()
+            },
+            AgentEvent::Tokens { input: 6, output: 294 },
+            AgentEvent::Done { reason: "success".into() },
+        ]
+    );
 }
 
 #[cfg(unix)]
@@ -249,5 +297,29 @@ mod spawn {
         println!("{got:#?}");
         assert!(got.iter().any(|e| matches!(e, AgentEvent::Done { .. })), "{got:?}");
         assert!(got.iter().any(|e| matches!(e, AgentEvent::Session(_))), "{got:?}");
+    }
+
+    /// The whole loop against a live app: the real `claude` designs on the canvas of the
+    /// FigCraft it is attached to, through `figcraft-cli mcp --attach`. Run by hand with the
+    /// app up, never in CI — this is the panel's turn end to end:
+    /// `FIGCRAFT_TEST_PORT=<control port> cargo test -p figcraft-agent -- --ignored live_claude_designs --nocapture`
+    #[ignore = "needs a running app, the real claude CLI and an account"]
+    #[test]
+    fn live_claude_designs_on_the_attached_canvas() {
+        let Some(port) = crate::live_tests::live_port() else { return };
+        let mut session = Session::new(Box::new(ClaudeCodeCli::new("claude", "figcraft-cli", port)));
+        session.send(&Turn { text: crate::live_tests::live_design_prompt("claude"), attachments: Vec::new() }).unwrap();
+        let got = collect_until_done(&session);
+        println!("{got:#?}");
+        assert!(got.iter().any(|e| matches!(e, AgentEvent::Done { .. })), "{got:?}");
+        // The canvas moved: a tool ran, so the turn reached the app and not just the model.
+        let tools: Vec<&str> = got
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStart { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!tools.is_empty(), "no MCP tool was called: {got:?}");
     }
 }

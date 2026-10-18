@@ -105,9 +105,22 @@ impl Pump {
     }
 }
 
-/// Output's first non-empty line, trimmed and cut: the panel's tool rows are one line.
+/// A tool result's text for the panel's row: MCP answers as a content array of
+/// `{type: "text", text}` items, some CLIs as a bare string.
+pub(crate) fn result_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(items) => items.iter().find_map(|b| b["text"].as_str()).unwrap_or_default().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// One line describing a tool's result for the panel's row. Our own server answers in
+/// JSON, which opens with a lone `{` on its own line — that line says nothing, so a
+/// bracket-only line gives way to the whole reply flattened into one.
 pub(crate) fn line160(text: &str) -> String {
-    cut(text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim())
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim();
+    if line.chars().any(|c| c.is_alphanumeric()) { cut(line) } else { cut(&text.split_whitespace().collect::<Vec<_>>().join(" ")) }
 }
 
 /// One line to at most 160 characters (157 plus the ellipsis).

@@ -539,7 +539,7 @@ fn bubble(ui: &mut Ui, text: &str, w: f32, t: &Tokens) {
 
 /// One tool call: a status dot, `name(args…)` on one line, and the result line once it lands.
 fn tool_row(ui: &mut Ui, name: &str, args: &str, result: Option<&(bool, String)>, w: f32, t: &Tokens) {
-    let short = name.rsplit('.').next().unwrap_or(name);
+    let short = short_tool_name(name);
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.add_space(widgets::PAD);
@@ -1073,6 +1073,17 @@ pub(crate) fn apply(chat: &mut Chat, event: AgentEvent) {
 pub(crate) fn one_line(args: &str) -> String {
     let flat: String = args.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat == "{}" { String::new() } else { flat }
+}
+
+/// What a tool row calls the tool: the last dotted part of a namespaced name, and the
+/// bare tool of an MCP name (`mcp__figcraft-app__create_node` → `create_node`). The panel
+/// is narrow; the server prefix is what the agent CLI needed, not what the row does.
+pub(crate) fn short_tool_name(name: &str) -> String {
+    let tail = name.rsplit('.').next().unwrap_or(name);
+    match tail.strip_prefix("mcp__") {
+        Some(rest) => rest.rsplit("__").next().unwrap_or(rest).to_string(),
+        None => tail.to_string(),
+    }
 }
 
 /// 1234 → "1.2k" (token counts in the header).

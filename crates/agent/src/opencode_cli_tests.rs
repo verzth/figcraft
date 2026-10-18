@@ -53,10 +53,41 @@ fn a_failed_tool_reports_its_error_and_a_reemitted_text_shows_only_its_growth() 
         got,
         vec![
             AgentEvent::Session("ses_abc".into()),
+            // A part that arrives only in its final state still opens its own row.
+            AgentEvent::ToolStart { name: "figcraft.apply_props".into(), args: String::new() },
             AgentEvent::ToolEnd { name: "figcraft.apply_props".into(), ok: false, summary: "no selection".into() },
             AgentEvent::Text("Halo du".into()),
             // The part arrived again with more text: only what is new, never a repeat.
             AgentEvent::Text("nia".into()),
+        ]
+    );
+}
+
+/// The real `opencode run --format json`, captured against a live app: every call of a
+/// design turn arrived inside the `execute` sandbox, alone, already `completed`, with the
+/// real MCP call recorded in `state.metadata.metadata.toolCalls` — `output` only on the
+/// part. Regression for reading `part.tool` and waiting for a running event: the panel
+/// then showed an unnamed "tool" row with an empty result.
+#[test]
+fn a_real_opencode_turn_reports_the_calls_inside_its_execute_wrapper() {
+    let mut p = Parser::default();
+    let got = events(
+        &mut p,
+        &[
+            r#"{"type":"tool_use","sessionID":"ses_live","part":{"id":"prt_7","sessionID":"ses_live","messageID":"msg_1","type":"tool","tool":"execute","state":{"status":"completed","input":{"code":"const r = await tools[\"figcraft-app\"].create_node({type:\"rectangle\"});\nreturn r;\n"},"output":"{\n  \"id\": 5,\n  \"node\": { \"name\": \"probe\" }\n}","title":"execute","metadata":{"metadata":{"toolCalls":[{"tool":"figcraft-app.create_node","status":"completed","input":{"type":"rectangle","name":"probe","x":500,"y":300,"width":90,"height":60}}],"truncated":false}}}}}"#,
+        ],
+    );
+    assert_eq!(
+        got,
+        vec![
+            AgentEvent::Session("ses_live".into()),
+            // The row is the real call, not the sandbox that carried it.
+            AgentEvent::ToolStart {
+                name: "figcraft-app.create_node".into(),
+                // Object arguments round-trip through JSON, so the keys come back sorted.
+                args: r#"{"height":60,"name":"probe","type":"rectangle","width":90,"x":500,"y":300}"#.into()
+            },
+            AgentEvent::ToolEnd { name: "figcraft-app.create_node".into(), ok: true, summary: r#"{ "id": 5, "node": { "name": "probe" } }"#.into() },
         ]
     );
 }
@@ -187,5 +218,28 @@ mod spawn {
         println!("{got:#?}");
         assert!(got.iter().any(|e| matches!(e, AgentEvent::Done { .. })), "{got:?}");
         assert!(got.iter().any(|e| matches!(e, AgentEvent::Session(_))), "{got:?}");
+    }
+
+    /// The whole loop against a live app: the real `opencode` designs on the canvas of the
+    /// FigCraft it is attached to, through `figcraft-cli mcp --attach`. Run by hand with
+    /// the app up, never in CI:
+    /// `FIGCRAFT_TEST_PORT=<control port> cargo test -p figcraft-agent -- --ignored live_opencode_designs --nocapture`
+    #[ignore = "needs a running app, the real opencode CLI and an account"]
+    #[test]
+    fn live_opencode_designs_on_the_attached_canvas() {
+        let Some(port) = crate::live_tests::live_port() else { return };
+        let mut session = Session::new(Box::new(OpenCodeCli::new("opencode", "figcraft-cli", port)));
+        session.send(&Turn { text: crate::live_tests::live_design_prompt("opencode"), attachments: Vec::new() }).unwrap();
+        let got = collect_until_done(&session);
+        println!("{got:#?}");
+        assert!(got.iter().any(|e| matches!(e, AgentEvent::Done { .. })), "{got:?}");
+        let tools: Vec<&str> = got
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolStart { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!tools.is_empty(), "no MCP tool was called: {got:?}");
     }
 }

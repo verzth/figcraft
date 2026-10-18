@@ -17,6 +17,8 @@ mod claude_cli_tests;
 #[cfg(test)]
 mod codex_cli_tests;
 #[cfg(test)]
+mod live_tests;
+#[cfg(test)]
 mod opencode_cli_tests;
 
 pub use claude_cli::{ClaudeCodeCli, SYSTEM_PROMPT_NOTE};
