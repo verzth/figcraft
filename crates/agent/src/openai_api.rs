@@ -24,6 +24,7 @@ use ureq::Agent;
 use crate::anthropic_api::SYSTEM;
 use crate::mcp_stdio::McpStdio;
 use crate::pump::line160;
+use crate::vision::Vision;
 use crate::{AgentError, AgentEvent, Backend, Turn};
 
 /// The model the panel offers when the user has not picked one.
@@ -111,16 +112,13 @@ impl Backend for OpenAiApi {
         if self.key.trim().is_empty() {
             return Err(AgentError::Setup("No OpenAI API key is set for this chat.".into()));
         }
-        let mut prompt = turn.text.trim().to_string();
-        if prompt.is_empty() && turn.attachments.is_empty() {
+        let vision = Vision::of(turn);
+        if vision.prompt.is_empty() {
             return Err(AgentError::Setup("Type a message to start the agent.".into()));
         }
-        if !turn.attachments.is_empty() {
-            // The API takes text, not files: the names keep the model aware of what the
-            // user attached, exactly as the CLI backends phrase it.
-            let names: Vec<&str> = turn.attachments.iter().map(|a| a.name.as_str()).collect();
-            prompt.push_str(&format!("\n\n(Attached files: {}.)", names.join(", ")));
-        }
+        // The images the bytes proved to be travel as data URLs beside the text; the
+        // prompt already names every attachment, carried or not, the way the CLIs do.
+        let content = user_content(&vision);
         let tx = self.tx.clone().ok_or_else(|| AgentError::Setup("The session has no event channel.".into()))?;
         self.cancelled.store(false, Ordering::SeqCst);
         self.running.store(true, Ordering::SeqCst);
@@ -136,7 +134,7 @@ impl Backend for OpenAiApi {
             cancelled: Arc::clone(&self.cancelled),
         };
         std::thread::spawn(move || {
-            let terminal = ctx.turn(&prompt);
+            let terminal = ctx.turn(content);
             // The flag drops before the terminal event: a panel that reacts to `Done` at
             // once and sends the next turn must not be refused as "still working".
             ctx.running.store(false, Ordering::SeqCst);
@@ -178,12 +176,13 @@ struct TurnCtx {
 
 impl TurnCtx {
     /// The whole turn, round by round; returns the event that ends it. The caller sets
-    /// `running` false and sends it — never the other way around.
-    fn turn(&self, prompt: &str) -> AgentEvent {
+    /// `running` false and sends it — never the other way around. `content` is the user
+    /// message already built: plain text, or text with image URLs beside it.
+    fn turn(&self, content: Value) -> AgentEvent {
         let mark = {
             let mut history = self.history();
             let mark = history.len();
-            history.push(json!({"role": "user", "content": prompt}));
+            history.push(json!({"role": "user", "content": content}));
             mark
         };
         let tools = api_tools();
@@ -356,6 +355,22 @@ enum ToolRound {
     Done(Vec<Value>),
     Fatal(String),
     Dead,
+}
+
+/// The user message: the prompt alone when nothing was carried, or a text part with the
+/// images beside it as `data:` URLs — each one's bytes base64-encoded under the media
+/// type they proved to be. (The prompt names every attachment either way, so the model
+/// can refer to it.)
+fn user_content(vision: &Vision) -> Value {
+    if vision.images.is_empty() {
+        return Value::String(vision.prompt.clone());
+    }
+    let mut parts = vec![json!({"type": "text", "text": vision.prompt})];
+    for (attachment, media_type) in vision.images.iter().copied() {
+        let url = format!("data:{media_type};base64,{}", crate::vision::encode(&attachment.data));
+        parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
+    }
+    Value::Array(parts)
 }
 
 /// The assistant's message for the history: its prose (or `null` — the API takes an empty

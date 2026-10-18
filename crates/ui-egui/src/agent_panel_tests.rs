@@ -3,7 +3,7 @@
 
 use figcraft_agent::AgentEvent;
 
-use crate::agent_panel::{Chat, Row, apply, fmt_tokens, one_line, short_tool_name};
+use crate::agent_panel::{Chat, Pending, Row, apply, fmt_tokens, one_line, short_tool_name};
 use crate::agents::BackendKind;
 use crate::i18n::tr;
 
@@ -301,4 +301,25 @@ fn enter_sends_shift_enter_breaks_a_line_and_a_refusal_keeps_the_words() {
     let s = drawn(&mut u);
     assert!(has_text(&s, "The AI agents server is not running. Turn it on in Preferences ▸ AI agents."));
     assert_eq!(u.app.ui.agent.draft, "A landing page", "a refused turn gives the words back");
+}
+
+/// A dropped image waits as a chip like a text file, and a refused send keeps it (and the
+/// words) for the retry: nothing about the drop is spent until a backend really runs it.
+#[test]
+fn an_image_drop_draws_a_chip_and_survives_a_refusal() {
+    let mut u = tab();
+    let s = drawn(&mut u);
+    click(&mut u, text_center(&s, "Design anything…"));
+    u.frame(vec![Event::Text("Lihat skema".into())]);
+    u.app.ui.agent.attachments.push(Pending::Image { name: "skema.png".into(), mime: "image/png", data: b"\x89PNG\r\n\x1a\nfigcraft".to_vec() });
+    let s = drawn(&mut u);
+    assert!(has_prefix(&s, "× skema.png"), "the image waits as a chip above the field");
+    // Enter sends — the server is not running, so the send is refused and says so.
+    for pressed in [true, false] {
+        u.frame_with(vec![Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE }], Modifiers::NONE);
+    }
+    let s = drawn(&mut u);
+    assert!(has_text(&s, "The AI agents server is not running. Turn it on in Preferences ▸ AI agents."));
+    assert_eq!(u.app.ui.agent.draft, "Lihat skema", "a refused turn gives the words back");
+    assert_eq!(u.app.ui.agent.attachments.len(), 1, "a refused turn keeps the drop");
 }

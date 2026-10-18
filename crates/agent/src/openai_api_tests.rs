@@ -404,6 +404,50 @@ data: [DONE]
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A dropped image travels: the user message becomes parts — the text (with the file
+    /// named, the words the CLI backends add) and the image's bytes as a `data:` URL under
+    /// the media type they proved to be — and the next turn goes back to a plain string.
+    #[test]
+    fn an_image_turn_sends_its_bytes_as_a_data_url_and_still_names_the_file() {
+        let api = FakeApi::start(vec![sse(ROUND_END), sse(ROUND_TURN2)]);
+        let dir = scratch("image");
+        let cli = fake_cli(&dir);
+        let mut session = Session::new(Box::new(OpenAiApi::new("sk-test-123", &cli, 7979).base_url(api.base.clone())));
+        let png = b"\x89PNG\r\n\x1a\nfigcraft";
+        let mut t = Turn {
+            text: "lihat skema ini".into(),
+            attachments: vec![crate::Attachment { name: "skema.png".into(), mime: "image/png".into(), data: png.to_vec() }],
+        };
+        session.send(&t).unwrap();
+        let got = collect_until_done(&session);
+        assert!(got.contains(&AgentEvent::Done { reason: "end_turn".into() }), "{got:?}");
+        let seen = api.seen();
+        let first: Value = serde_json::from_str(&seen[0].1).unwrap();
+        let messages = first["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "system prompt + the one prompt");
+        let content = &messages[1]["content"];
+        let parts = content.as_array().unwrap_or_else(|| panic!("a turn with an image sends content parts, not a string: {content}"));
+        assert_eq!(parts[0]["type"], "text");
+        let text = parts[0]["text"].as_str().unwrap();
+        assert!(text.contains("lihat skema ini") && text.contains("(Attached files: skema.png.)"), "{text}");
+        assert_eq!(parts.len(), 2, "one text part, one image part: {parts:?}");
+        assert_eq!(parts[1]["type"], "image_url");
+        let url = parts[1]["image_url"]["url"].as_str().unwrap();
+        assert_eq!(url, format!("data:image/png;base64,{}", crate::vision::encode(png)));
+        // Without an image the message is a string again — the shapes never mix.
+        t.attachments.clear();
+        t.text = "sekarang lingkaran".into();
+        session.send(&t).unwrap();
+        let got2 = collect_until_done(&session);
+        assert!(got2.contains(&AgentEvent::Done { reason: "end_turn".into() }), "{got2:?}");
+        // One request per turn: the second carries system + the committed first turn,
+        // then its own prompt as a plain string again.
+        let second: Value = serde_json::from_str(&api.seen()[1].1).unwrap();
+        let messages = second["messages"].as_array().unwrap();
+        assert_eq!(messages[3]["content"], "sekarang lingkaran");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_refusal_names_the_status_and_the_api_s_own_message() {
         let api = FakeApi::start(vec![refused(401, r#"{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}"#)]);

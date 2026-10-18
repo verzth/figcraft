@@ -20,7 +20,9 @@ use egui::{Align2, Color32, CornerRadius, Key, Layout, Rect, RichText, Sense, St
 use figcraft_agent::AnthropicApi;
 #[cfg(not(target_arch = "wasm32"))]
 use figcraft_agent::OpenAiApi;
-use figcraft_agent::{AgentEvent, ApiKeys, Backend, ClaudeCodeCli, CodexCli, OpenCodeCli, Session, Turn};
+use figcraft_agent::{
+    AgentEvent, ApiKeys, Attachment, Backend, ClaudeCodeCli, CodexCli, MAX_IMAGE_BYTES, OpenCodeCli, Session, Turn, image_media_type,
+};
 
 use crate::FigApp;
 use crate::agent_models::{ModelChoice, Models, Route};
@@ -38,7 +40,8 @@ const INPUT_H: f32 = 100.0;
 /// Extra input-block height for the setup note above the field, and for the drop chips.
 const ERROR_H: f32 = 40.0;
 const DROPS_H: f32 = 36.0;
-/// Attached text files: at most this many, each read to at most this many characters.
+/// Attachments: at most this many (text files and images together), each text file read
+/// to at most [`MAX_DROP_CHARS`] characters and each image to [`MAX_IMAGE_BYTES`] bytes.
 const MAX_DROPS: usize = 4;
 const MAX_DROP_CHARS: usize = 32_768;
 
@@ -116,9 +119,41 @@ impl Drop for Link {
 }
 
 enum Cmd {
-    Turn(String),
+    Turn(Turn),
     Cancel,
     Shutdown,
+}
+
+/// One thing dropped on the panel, waiting for the next send: a text file (its text goes
+/// into the message) or an image (its bytes travel with the turn — the API backends see
+/// it, the CLIs name it in the prompt).
+#[derive(Clone)]
+pub enum Pending {
+    /// A text file, already read to text.
+    Text {
+        /// The file name.
+        name: String,
+        /// The file's text, capped to [`MAX_DROP_CHARS`] characters.
+        content: String,
+    },
+    /// An image whose bytes proved to be one (sniffed by [`image_media_type`]).
+    Image {
+        /// The file name.
+        name: String,
+        /// The media type its magic bytes claimed: `image/png`, …
+        mime: &'static str,
+        /// The image's bytes, at most [`MAX_IMAGE_BYTES`] of them.
+        data: Vec<u8>,
+    },
+}
+
+impl Pending {
+    /// The file's name, as the chip draws it.
+    fn name(&self) -> &str {
+        match self {
+            Pending::Text { name, .. } | Pending::Image { name, .. } => name,
+        }
+    }
 }
 
 /// The Agent tab's state (kept in [`crate::UiState`]).
@@ -128,8 +163,8 @@ pub struct AgentUi {
     pub active: usize,
     /// The text being typed (shared across conversations, as one draft box).
     pub draft: String,
-    /// Text files dropped on the panel, waiting for the next send.
-    pub attachments: Vec<(String, String)>,
+    /// Text files and images dropped on the panel, waiting for the next send.
+    pub attachments: Vec<Pending>,
     /// Why the last send couldn't start (no server, no backend…), shown above the input.
     pub setup_error: Option<String>,
     /// The backends found on this computer (scanned once, when the tab first draws).
@@ -478,7 +513,7 @@ fn empty_state(app: &mut FigApp, ui: &mut Ui) {
         ui.set_max_width((ui.available_width() - widgets::PAD).max(80.0));
         ui.add(
             egui::Label::new(
-                RichText::new(tr("Drop a DESIGN.md or any text file into the chat; it goes with your message."))
+                RichText::new(tr("Drop a DESIGN.md, a text file or an image into the chat; it goes with your message."))
                     .font(regular(10.5))
                     .color(t.text_secondary),
             )
@@ -597,13 +632,13 @@ fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
         });
         ui.add_space(4.0);
     }
-    // Dropped text files, waiting for the next send (click one to take it back).
+    // Dropped files, waiting for the next send (click one to take it back).
     if !app.ui.agent.attachments.is_empty() {
         let mut remove: Option<usize> = None;
         ui.horizontal_wrapped(|ui| {
             ui.add_space(widgets::PAD);
-            for (i, (name, _)) in app.ui.agent.attachments.iter().enumerate() {
-                let shown = format!("× {}", widgets::elide_font(ui, name, 140.0, regular(10.5)));
+            for (i, pending) in app.ui.agent.attachments.iter().enumerate() {
+                let shown = format!("× {}", widgets::elide_font(ui, pending.name(), 140.0, regular(10.5)));
                 let picked =
                     egui::Frame::NONE.fill(t.field).corner_radius(CornerRadius::same(6)).inner_margin(egui::Margin::symmetric(8, 3)).show(ui, |ui| {
                         let r = ui
@@ -720,8 +755,8 @@ fn send_stop(ui: &mut Ui, running: bool, sendable: bool, t: &Tokens) -> bool {
     resp.clicked() && sendable
 }
 
-/// Take files dropped onto the panel: text files become attachments for the next send
-/// (images come with the vision work; the note under the chips says "text file" for now).
+/// Take files dropped onto the panel: an image's bytes travel with the next send, and a
+/// text file's text becomes part of the message (the empty state's note says so).
 fn dropped(app: &mut FigApp, ctx: &egui::Context) {
     let files: Vec<egui::DroppedFileHandle> = ctx.input(|i| i.raw.dropped_files.clone());
     if files.is_empty() {
@@ -736,15 +771,23 @@ fn dropped(app: &mut FigApp, ctx: &egui::Context) {
         // A file on disk is read by path; a drop with no file behind it carries its bytes.
         let bytes = if path.exists() { std::fs::read(&path).ok() } else { crate::dropped_bytes(&file) };
         let Some(bytes) = bytes else { continue };
+        // A real image the APIs can see (sniffed, not named): its bytes ride along —
+        // up to the API's own cap; over it, the drop is skipped as any binary is.
+        if let Some(mime) = image_media_type(&bytes) {
+            if bytes.len() <= MAX_IMAGE_BYTES {
+                app.ui.agent.attachments.push(Pending::Image { name, mime, data: bytes });
+            }
+            continue;
+        }
         let content: String = String::from_utf8_lossy(&bytes).chars().take(MAX_DROP_CHARS).collect();
-        // Mostly replacement characters: a binary (an image) — not this send's context.
+        // Mostly replacement characters: a binary — not this send's context.
         if content.matches('\u{fffd}').count() * 40 > content.len() {
             continue;
         }
         if content.trim().is_empty() {
             continue;
         }
-        app.ui.agent.attachments.push((name, content));
+        app.ui.agent.attachments.push(Pending::Text { name, content });
     }
 }
 
@@ -877,13 +920,24 @@ fn send_turn(app: &mut FigApp, ctx: &egui::Context) {
     // The CLIs carry their executable; the API backends take their key from the prefs file.
     let bin = app.ui.agent.backends.iter().find(|b| b.kind == kind).and_then(|b| b.bin.clone());
     let keys = app.services.agents().and_then(|h| h.agent_keys()).unwrap_or_default();
-    // What the agent sees: the typed message, then every attached file's text.
+    // What the agent sees: the typed message, then every attached text file's content.
+    // An image's bytes travel with the turn instead — the API backends see them, the
+    // CLIs name them — and the transcript records every attachment by name either way.
     let mut text = original.clone();
-    if has_context {
-        for (name, content) in &app.ui.agent.attachments {
-            text.push_str(&format!("\n\n(Attached file: {name})\n{content}"));
+    let mut shown = original.clone();
+    let mut images = Vec::new();
+    for pending in &app.ui.agent.attachments {
+        match pending {
+            Pending::Text { name, content } => {
+                let line = format!("\n\n(Attached file: {name})\n{content}");
+                text.push_str(&line);
+                shown.push_str(&line);
+            }
+            Pending::Image { name, mime, data } => {
+                shown.push_str(&format!("\n\n(Attached file: {name})"));
+                images.push(Attachment { name: name.clone(), mime: mime.to_string(), data: data.clone() });
+            }
         }
-        app.ui.agent.attachments.clear();
     }
     let Some(chat) = app.ui.agent.chats.get_mut(active) else { return };
     // A chat restored from the history continues its CLI session — under the backend that
@@ -901,14 +955,17 @@ fn send_turn(app: &mut FigApp, ctx: &egui::Context) {
         std::thread::spawn(move || worker(built, resume, rx_cmd, tx_ev, ctx));
         chat.link = Some(Link { cmd: tx_cmd, events: rx_ev });
     }
+    // The drops belong to this turn now — and everything that could still refuse has run,
+    // so a send that never started keeps them for the retry.
+    app.ui.agent.attachments.clear();
     chat.kind = Some(kind);
     if chat.created <= 0.0 {
         chat.created = now_secs();
     }
-    chat.rows.push(Row::User(text.clone()));
+    chat.rows.push(Row::User(shown));
     chat.running = true;
     if let Some(link) = &chat.link {
-        let _ = link.cmd.send(Cmd::Turn(text));
+        let _ = link.cmd.send(Cmd::Turn(Turn { text, attachments: images }));
     }
     persist(app);
 }
@@ -1037,15 +1094,12 @@ fn worker(backend: Box<dyn Backend>, resume: Option<String>, cmd: Receiver<Cmd>,
     let mut busy = false;
     loop {
         match cmd.try_recv() {
-            Ok(Cmd::Turn(text)) => {
-                let turn = Turn { text, attachments: Vec::new() };
-                match session.send(&turn) {
-                    Ok(()) => busy = true,
-                    Err(e) => {
-                        let _ = events.send(AgentEvent::Failed(e.to_string()));
-                    }
+            Ok(Cmd::Turn(turn)) => match session.send(&turn) {
+                Ok(()) => busy = true,
+                Err(e) => {
+                    let _ = events.send(AgentEvent::Failed(e.to_string()));
                 }
-            }
+            },
             Ok(Cmd::Cancel) => session.cancel(),
             Ok(Cmd::Shutdown) | Err(TryRecvError::Disconnected) => break,
             Err(TryRecvError::Empty) => {}

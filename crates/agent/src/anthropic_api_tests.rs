@@ -442,6 +442,49 @@ data: {"type":"message_stop"}
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A dropped image travels: the user message becomes blocks — the text (with the file
+    /// named, the words the CLI backends add) and the image's bytes base64-encoded under
+    /// the media type they proved to be — and the next turn goes back to a plain string.
+    #[test]
+    fn an_image_turn_sends_its_bytes_as_an_image_block_and_still_names_the_file() {
+        let api = FakeApi::start(vec![sse(ROUND_END), sse(ROUND_TURN2)]);
+        let dir = scratch("image");
+        let cli = fake_cli(&dir);
+        let mut session = Session::new(Box::new(AnthropicApi::new("sk-ant-test", &cli, 7979).base_url(api.base.clone())));
+        let png = b"\x89PNG\r\n\x1a\nfigcraft";
+        let mut t = Turn {
+            text: "lihat skema ini".into(),
+            attachments: vec![crate::Attachment { name: "skema.png".into(), mime: "image/png".into(), data: png.to_vec() }],
+        };
+        session.send(&t).unwrap();
+        let got = collect_until_done(&session);
+        assert!(got.contains(&AgentEvent::Done { reason: "end_turn".into() }), "{got:?}");
+        let seen = api.seen();
+        let first: Value = serde_json::from_str(&seen[0].1).unwrap();
+        let content = &first["messages"][0]["content"];
+        let blocks = content.as_array().unwrap_or_else(|| panic!("a turn with an image sends content blocks, not a string: {content}"));
+        assert_eq!(blocks[0]["type"], "text");
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(text.contains("lihat skema ini") && text.contains("(Attached files: skema.png.)"), "{text}");
+        assert_eq!(blocks.len(), 2, "one text block, one image block: {blocks:?}");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], crate::vision::encode(png), "the bytes arrive whole");
+        // Without an image the message is a string again — the shapes never mix.
+        t.attachments.clear();
+        t.text = "sekarang lingkaran".into();
+        session.send(&t).unwrap();
+        let got2 = collect_until_done(&session);
+        assert!(got2.contains(&AgentEvent::Done { reason: "end_turn".into() }), "{got2:?}");
+        // One request per turn: the second carries the committed first turn, then its
+        // own prompt as a plain string again.
+        let second: Value = serde_json::from_str(&api.seen()[1].1).unwrap();
+        let messages = second["messages"].as_array().unwrap();
+        assert_eq!(messages[2]["content"], "sekarang lingkaran");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_refusal_names_the_status_and_the_api_s_own_message() {
         let api = FakeApi::start(vec![refused(401, r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#)]);

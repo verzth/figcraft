@@ -1471,6 +1471,7 @@ dependencies = [
 name = "figcraft-agent"
 version = "0.6.0"
 dependencies = [
+ "base64 0.22.1",
  "figcraft-mcp",
  "serde",
  "serde_json",

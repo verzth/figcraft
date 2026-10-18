@@ -18,6 +18,7 @@ mod mcp_stdio;
 mod openai_api;
 mod opencode_cli;
 mod pump;
+pub mod vision;
 
 #[cfg(test)]
 mod anthropic_api_tests;
@@ -35,6 +36,8 @@ mod mcp_stdio_tests;
 mod openai_api_tests;
 #[cfg(test)]
 mod opencode_cli_tests;
+#[cfg(test)]
+mod vision_tests;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use anthropic_api::AnthropicApi;
@@ -44,6 +47,7 @@ pub use keys::{ApiKeys, FILE_NAME};
 #[cfg(not(target_arch = "wasm32"))]
 pub use openai_api::OpenAiApi;
 pub use opencode_cli::OpenCodeCli;
+pub use vision::{MAX_IMAGE_BYTES, image_media_type};
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 

@@ -46,8 +46,10 @@ can run it — a Claude model goes to `claude` when it is installed, else to the
 a key is set). Above it, *New chat* starts over and the session dropdown opens the chat history —
 today's, the previous week's, older — kept in the app's config folder (`AgentSessions.json`)
 and restored on the next launch, each conversation with its session id so it resumes where it
-stopped. Clearing the history needs a second click. Drop a text file on the panel and it rides
-along with the next message.
+stopped. Clearing the history needs a second click. Drop a file on the panel and it rides along
+with the next message: a text file's words join the message itself, and an image (PNG, JPEG,
+GIF or WebP, sniffed from its bytes, up to 5 MB) goes with it as vision input — the API
+backends see it, while a CLI, which cannot carry bytes, is given its name in the prompt.
 
 The API backends keep their key in `AgentKeys.json`, beside `AgentSessions.json` in the config
 folder, written atomically with owner-only permissions and never shown on screen once entered —
