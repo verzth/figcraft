@@ -133,7 +133,7 @@ fn a_chat_is_named_after_its_first_words_and_elides_long_thoughts() {
 
 // --- The tab drawn headless: the pen.dev layout, its dropdown, and the send rules. ---
 
-use egui::{Event, Key, Modifiers, PointerButton, Pos2, Shape};
+use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, Shape, pos2};
 use figcraft_engine::Session;
 
 use crate::layers_drag_tests::Ui;
@@ -145,6 +145,70 @@ fn tab() -> Ui {
     u.app.ui.left_tab = crate::LeftTab::Agent;
     u.frame(vec![]);
     u
+}
+
+/// What the Agent panel painted, and the span it paints inside: the icon rail is 56 wide
+/// (lib.rs) and the panel is asked for `left_width`. The shapes are taken by clip rect rather
+/// than by folding over every rect in the frame — the rail, the canvas and the right panel all
+/// paint their own shapes past these edges, so a check over the whole frame's shapes holds no
+/// matter what the panel does.
+fn panel_shapes(u: &mut Ui) -> (Vec<Shape>, Rect) {
+    u.frame(vec![]);
+    let (left, right) = (56.0, 56.0 + u.app.ui.left_width);
+    let mut painted = Vec::new();
+    for clipped in &u.frame_output(vec![]).shapes {
+        let clip = clipped.clip_rect;
+        if clip.min.x >= left - 0.5 && clip.max.x <= right + 0.5 {
+            painted.extend(flat(std::slice::from_ref(clipped)));
+        }
+    }
+    (painted, Rect::from_min_max(pos2(left, 0.0), pos2(right, 0.0)))
+}
+
+/// Nothing in the panel may start left of the content edge: in the header's right-to-left row a
+/// widget whose floor exceeded the space left allocated past the panel's left edge, and egui then
+/// painted the whole panel 34px narrower than it was asked for (the canvas showed a gap beside it).
+#[test]
+fn no_text_starts_left_of_the_panel() {
+    let mut u = tab();
+    let (painted, span) = panel_shapes(&mut u);
+    assert!(has_text(&painted, "New chat"), "the panel's own shapes are found by their clip rect");
+    for (text, at, _) in crate::live_tests::texts(&painted) {
+        assert!(at.x >= span.min.x - 0.5, "{text:?} starts at x={} inside the panel's left edge x={}", at.x, span.min.x);
+    }
+}
+
+/// Nothing may run past the panel's right edge either: the names at the right end of the header
+/// and of the field's controls row elide to the room they have rather than shoving their group
+/// off the panel — the draft and the controls were once laid out side by side inside the field,
+/// which pushed the controls clean off it.
+#[test]
+fn no_text_runs_past_the_panel() {
+    let mut u = tab();
+    let (painted, span) = panel_shapes(&mut u);
+    assert!(has_text(&painted, "New chat"), "the panel's own shapes are found by their clip rect");
+    for (text, at, size) in crate::live_tests::texts(&painted) {
+        assert!(at.x + size.x <= span.max.x + 0.5, "{text:?} ends at x={} past the panel's right edge x={}", at.x + size.x, span.max.x);
+    }
+}
+
+/// The panel at its narrow default width with a CLI actually installed — the state the shipped
+/// app is in. The session name stays whole, the status beside it steps aside rather than
+/// squeezing the dropdown, and the field's two ends (which CLI, which model) sit on their own
+/// row under the draft instead of being shoved past the panel's right edge.
+#[test]
+fn with_a_backend_the_names_stay_inside_the_panel() {
+    let mut u = tab();
+    u.app.ui.agent.backends = vec![crate::agents::PanelBackend { kind: crate::agents::BackendKind::ClaudeCode, bin: "claude".into() }];
+    // Plant the backend rather than scanning this machine: `resolved` makes the scan a no-op.
+    u.app.ui.agent.resolved = true;
+    let (painted, span) = panel_shapes(&mut u);
+    assert!(has_text(&painted, "New Agent"), "the session name is whole beside the status");
+    assert!(has_text(&painted, "Claude Code"), "the CLI's name draws in the field's controls row");
+    for (text, at, size) in crate::live_tests::texts(&painted) {
+        assert!(at.x >= span.min.x - 0.5, "{text:?} starts at x={} inside the panel's left edge x={}", at.x, span.min.x);
+        assert!(at.x + size.x <= span.max.x + 0.5, "{text:?} ends at x={} past the panel's right edge x={}", at.x + size.x, span.max.x);
+    }
 }
 
 /// One more frame, and the shapes it drew.

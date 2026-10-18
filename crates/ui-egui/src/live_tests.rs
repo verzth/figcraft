@@ -166,11 +166,14 @@ impl Harness {
     }
 }
 
+/// Every drawn text with the rectangle it actually occupies: `TextShape::pos` is the galley's
+/// origin, which egui puts at the text's _right_ edge inside a right-to-left row, so the
+/// galley's own rect (already alignment-shifted) is what says where the words really are.
 pub(crate) fn texts(shapes: &[Shape]) -> Vec<(String, Pos2, egui::Vec2)> {
     shapes
         .iter()
         .filter_map(|s| match s {
-            Shape::Text(t) => Some((t.galley.text().to_string(), t.pos, t.galley.size())),
+            Shape::Text(t) => Some((t.galley.text().to_string(), t.pos + t.galley.rect.min.to_vec2(), t.galley.rect.size())),
             _ => None,
         })
         .collect()

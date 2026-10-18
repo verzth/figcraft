@@ -266,7 +266,9 @@ fn header(app: &mut FigApp, ui: &mut Ui) {
                 app.ui.agent.clear_armed = false;
                 persist(app);
             }
-            // Which CLI runs the turns, and how the turn is going.
+            // Which CLI runs the turns, and how the turn's going. This sits after the session
+            // dropdown in the right-to-left flow, so it elides into whatever the dropdown and
+            // the two buttons leave; the session name itself stays readable.
             if !app.ui.agent.backends.is_empty() {
                 let chat = app.ui.agent.chats.get(app.ui.agent.active);
                 let status = match chat {
@@ -279,9 +281,16 @@ fn header(app: &mut FigApp, ui: &mut Ui) {
                 }
                 bits.push(status);
                 let color = if chat.is_some_and(|c| c.running) { t.accent } else { t.text_secondary };
-                ui.label(RichText::new(bits.join(" · ")).font(semibold(10.5)).color(color));
+                let bits = bits.join(" · ");
+                // Placed before the session dropdown in this right-to-left row, so the chat's
+                // name gets its room first: this label only takes what's above ~96px for the
+                // dropdown, and steps out entirely when the row is too tight to hold both.
+                let room = (ui.available_width() - 96.0).clamp(0.0, 72.0);
+                if room >= 24.0 {
+                    let shown = widgets::elide_font(ui, &bits, room, semibold(10.5));
+                    ui.label(RichText::new(shown).font(semibold(10.5)).color(color));
+                }
             }
-            // The session dropdown: the chat's name, click for its history.
             session_trigger(app, ui, &t);
         });
     });
@@ -290,7 +299,10 @@ fn header(app: &mut FigApp, ui: &mut Ui) {
 /// The session dropdown in the header: the current chat's name, and the history below it.
 fn session_trigger(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
     let title = app.ui.agent.chats.get(app.ui.agent.active).map(|c| c.title()).unwrap_or_else(|| tr("New Agent").to_string());
-    let w = (ui.available_width() - 10.0).max(120.0);
+    // Take what's left of the header row; a floor here would over-allocate and blow the
+    // panel's rect leftward (the row already stacks the collapse button, New chat and status).
+    // The row's outer padding already clears the panel's edge, so no slack on top of it.
+    let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
     ui.painter().rect_filled(rect, CornerRadius::same(8), t.field);
     if resp.hovered() {
@@ -459,7 +471,7 @@ fn empty_state(app: &mut FigApp, ui: &mut Ui) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(widgets::PAD);
-        ui.set_max_width(ui.available_width() - widgets::PAD * 2.0);
+        ui.set_max_width((ui.available_width() - widgets::PAD).max(80.0));
         ui.add(
             egui::Label::new(
                 RichText::new(tr("Drop a DESIGN.md or any text file into the chat; it goes with your message."))
@@ -473,7 +485,9 @@ fn empty_state(app: &mut FigApp, ui: &mut Ui) {
 
 /// One suggestion chip: a full-width bordered row with left-aligned, elided text (pen.dev's).
 fn chip_row(ui: &mut Ui, label: &str, t: &Tokens, taken: bool) -> bool {
-    let w = ui.available_width();
+    // The row starts after the left PAD inside a horizontal; keep the same PAD on the right
+    // so the chip's border doesn't hug the panel edge.
+    let w = (ui.available_width() - widgets::PAD).max(60.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
     if taken || resp.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::same(8), if taken { t.selected_row } else { t.hover });
@@ -552,7 +566,7 @@ fn tool_row(ui: &mut Ui, name: &str, args: &str, result: Option<&(bool, String)>
     {
         ui.horizontal(|ui| {
             ui.add_space(widgets::PAD + 13.0);
-            ui.set_max_width(w - widgets::PAD * 2.0);
+            ui.set_max_width((w - widgets::PAD * 2.0 - 13.0).max(80.0));
             ui.add(egui::Label::new(RichText::new(summary).font(regular(10.0)).color(t.text_tertiary)).wrap());
         });
     }
@@ -609,53 +623,68 @@ fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
     let mut send = false;
     ui.horizontal(|ui| {
         ui.add_space(widgets::PAD);
+        ui.set_max_width((ui.available_width() - widgets::PAD).max(120.0));
         egui::Frame::NONE
             .fill(t.field)
             .corner_radius(CornerRadius::same(10))
             .inner_margin(egui::Margin::same(8))
             .stroke(Stroke::new(1.0, t.border))
             .show(ui, |ui| {
-                let field_w = ui.available_width();
-                // The draft: Enter sends, Shift+Enter breaks the line.
-                let draft = &mut app.ui.agent.draft;
-                let shown = ui.add(
-                    egui::TextEdit::multiline(draft)
-                        .id(ui.id().with("agent_draft"))
-                        .frame(egui::Frame::NONE)
-                        .font(regular(11.5))
-                        .hint_text(tr("Design anything…"))
-                        .desired_rows(3)
-                        .desired_width(field_w - 4.0),
-                );
-                // Enter sends (NumpadEnter maps to it too): a multiline field keeps its focus
-                // when Enter is pressed, so watch for the key while the field holds it.
-                if shown.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift) && (has_text || has_context) && !running {
-                    send = true;
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    // Left: which CLI runs the turns; a chevron cycles when this computer
-                    // has more than one (the model picker routes around it anyway).
-                    if !app.ui.agent.backends.is_empty() {
-                        ui.label(RichText::new(app.ui.agent.selected_name()).font(semibold(10.5)).color(t.text_secondary));
-                        let n = app.ui.agent.backends.len();
-                        if n > 1 {
-                            let next = app.ui.agent.backends[(app.ui.agent.backend + 1) % n].kind.name().to_string();
-                            if widgets::icon_button(ui, crate::icons::Icon::Chevron, &trf("Switch to {name}", &[("name", &next)])) {
-                                app.ui.agent.backend = (app.ui.agent.backend + 1) % n;
-                            }
-                        }
+                // The field stacks: the draft on top, the controls row under it. The frame's
+                // ui inherits the row's horizontal layout, so it has to be told — left as it
+                // was, the draft took the field's whole width and shoved the controls past
+                // the panel's right edge.
+                ui.vertical(|ui| {
+                    let field_w = ui.available_width();
+                    // The draft: Enter sends, Shift+Enter breaks the line.
+                    let draft = &mut app.ui.agent.draft;
+                    let shown = ui.add(
+                        egui::TextEdit::multiline(draft)
+                            .id(ui.id().with("agent_draft"))
+                            .frame(egui::Frame::NONE)
+                            .font(regular(11.5))
+                            .hint_text(tr("Design anything…"))
+                            .desired_rows(3)
+                            .desired_width(field_w - 4.0),
+                    );
+                    // Enter sends (NumpadEnter maps to it too): a multiline field keeps its focus
+                    // when Enter is pressed, so watch for the key while the field holds it.
+                    if shown.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift) && (has_text || has_context) && !running {
+                        send = true;
                     }
-                    // Right: the model picker, then the round send button (Stop while it works).
-                    ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                        if send_stop(ui, running, sendable, &t) {
-                            if running {
-                                cancel(app);
-                            } else {
-                                send = true;
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        // Left: which CLI runs the turns; a chevron cycles when this computer
+                        // has more than one (the model picker routes around it anyway). This is
+                        // placed last in the right-to-left row, so it takes a small bounded slice
+                        // of what the model picker leaves, and can never shove that group past the
+                        // field's edge.
+                        if !app.ui.agent.backends.is_empty() {
+                            let name = app.ui.agent.selected_name();
+                            // Never more than the row actually has: a floor here would over-allocate
+                            // and push the model picker and send button past the field's right edge.
+                            let room = ui.available_width().min(104.0);
+                            let shown = widgets::elide_font(ui, &name, room, semibold(10.5));
+                            ui.label(RichText::new(shown).font(semibold(10.5)).color(t.text_secondary));
+                            let n = app.ui.agent.backends.len();
+                            if n > 1 {
+                                let next = app.ui.agent.backends[(app.ui.agent.backend + 1) % n].kind.name().to_string();
+                                if widgets::icon_button(ui, crate::icons::Icon::Chevron, &trf("Switch to {name}", &[("name", &next)])) {
+                                    app.ui.agent.backend = (app.ui.agent.backend + 1) % n;
+                                }
                             }
                         }
-                        model_trigger(app, ui, &t);
+                        // Right: the model picker, then the round send button (Stop while it works).
+                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                            if send_stop(ui, running, sendable, &t) {
+                                if running {
+                                    cancel(app);
+                                } else {
+                                    send = true;
+                                }
+                            }
+                            model_trigger(app, ui, &t);
+                        });
                     });
                 });
             });
@@ -721,10 +750,15 @@ fn model_trigger(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
     let label = app.ui.agent.models.label();
     let id = egui::Id::new("agent_model_picker");
     let was_open = egui::Popup::is_id_open(ui.ctx(), id);
-    // Room for the chevron, painted into the gap between the name and the send button.
+    // Room for the chevron, painted into the gap between the name and the send button. This sits
+    // in a right-to-left group whose available_width() has already shrunk past the send button,
+    // so the name elides into a fixed share of the row rather than what happens to be left —
+    // the backend name on the far left keeps its own share and neither clips the other.
     ui.add_space(16.0);
+    let room = ui.available_width().min(150.0);
+    let shown = widgets::elide_font(ui, &label, room, semibold(10.5));
     let resp = ui
-        .add(egui::Label::new(RichText::new(label.clone()).font(semibold(10.5)).color(t.text)).sense(Sense::click()))
+        .add(egui::Label::new(RichText::new(shown).font(semibold(10.5)).color(t.text)).sense(Sense::click()))
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     crate::a11y::button(&resp, &trf("Model: {name}", &[("name", &label)]));
     let chevron = Rect::from_center_size(pos2(resp.rect.right() + 8.0, resp.rect.center().y), vec2(9.0, 9.0));
