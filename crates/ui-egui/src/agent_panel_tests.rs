@@ -2,6 +2,7 @@
 //! itself drawn headless through egui: the pen.dev layout, its history dropdown, and Enter-to-send.
 
 use figcraft_agent::AgentEvent;
+use figcraft_engine::{AgentParallel, AgentRefine};
 
 use crate::agent_panel::{Chat, Cmd, Link, Pending, Row, apply, fmt_tokens, hist_stamp, one_line, refine_once, short_tool_name, take_file};
 use crate::agents::BackendKind;
@@ -490,31 +491,59 @@ fn count_center(s: &[Shape], n: usize) -> Pos2 {
     p + size / 2.0
 }
 
-/// The first count in the controls row steps with a click — parallel agents, one at a time —
-/// and wraps back to one past its cap; the rounds count beside it is untouched. Both live in
-/// the saved prefs, so the shape of the next send is remembered.
-#[test]
-fn the_parallel_agents_count_steps_and_wraps() {
-    let mut u = tab();
-    assert_eq!(u.app.session.prefs.agent_runs, (1, 1), "one agent, one round by default");
-    for want in [2, 3, 4, 1] {
-        let s = drawn(&mut u);
-        click(&mut u, count_center(&s, 0));
-        assert_eq!(u.app.session.prefs.agent_runs.0, want, "the agents count steps and wraps");
-        assert_eq!(u.app.session.prefs.agent_runs.1, 1, "the rounds count is untouched");
-    }
+/// Every shape a frame painted, across all its clip rects.
+fn shapes_of(out: &egui::FullOutput) -> Vec<Shape> {
+    out.shapes.iter().flat_map(|c| flat(std::slice::from_ref(c))).collect()
 }
 
-/// …and so does the second: how many refine rounds each agent runs.
+/// The parallel-agents pill opens a popover instead of stepping its count: the popover names
+/// what it sets up, offers how the agents share the work (split one design, or each build their
+/// own), and the number that runs at once — each choice landing in the saved prefs.
 #[test]
-fn the_refine_rounds_count_steps_and_wraps() {
+fn the_parallel_popover_picks_the_mode_and_the_count() {
     let mut u = tab();
-    for want in [2, 3, 4, 1] {
-        let s = drawn(&mut u);
-        click(&mut u, count_center(&s, 1));
-        assert_eq!(u.app.session.prefs.agent_runs.1, want, "the rounds count steps and wraps");
-        assert_eq!(u.app.session.prefs.agent_runs.0, 1, "the agents count is untouched");
+    assert_eq!(u.app.session.prefs.agent_runs, (1, 1), "one agent, one round by default");
+    assert_eq!(u.app.session.prefs.agent_parallel, AgentParallel::SideBySide, "side by side by default");
+    // The pill opens its popover.
+    let s = drawn(&mut u);
+    click(&mut u, count_center(&s, 0));
+    assert!(egui::Popup::is_id_open(&u.ctx, egui::Id::new("agent_parallel")), "the parallel pill opens its popover");
+    // The popover draws its header, its two mode cards and its count row.
+    u.frame_output(vec![]);
+    let painted = shapes_of(&u.frame_output(vec![]));
+    for want in [tr("Parallel agents"), tr("Split Work"), tr("Side by side"), tr("Agents")] {
+        assert!(has_text(&painted, want), "the popover draws {want:?}");
     }
+    // Pick "Split Work": the agents now split one design between them.
+    click(&mut u, text_center(&painted, tr("Split Work")));
+    assert_eq!(u.app.session.prefs.agent_parallel, AgentParallel::SplitWork, "the split-work card is picked");
+    // Pick three agents; the refine rounds beside them are untouched.
+    click(&mut u, text_center(&painted, "3"));
+    assert_eq!(u.app.session.prefs.agent_runs.0, 3, "the count chip sets how many agents run");
+    assert_eq!(u.app.session.prefs.agent_runs.1, 1, "the refine rounds are untouched");
+}
+
+/// The iteration popover does the same for the refine rounds: what they fix (the layout, or the
+/// style) and how many run, "Don't iterate" standing for the single round that isn't one.
+#[test]
+fn the_iteration_popover_picks_what_the_rounds_fix_and_how_many() {
+    let mut u = tab();
+    assert_eq!(u.app.session.prefs.agent_refine, AgentRefine::Layout, "the layout by default");
+    let s = drawn(&mut u);
+    click(&mut u, count_center(&s, 1));
+    assert!(egui::Popup::is_id_open(&u.ctx, egui::Id::new("agent_iterate")), "the iteration pill opens its popover");
+    u.frame_output(vec![]);
+    let painted = shapes_of(&u.frame_output(vec![]));
+    for want in [tr("Iteration"), tr("Layout"), tr("Style"), tr("Variants"), tr("Don't iterate")] {
+        assert!(has_text(&painted, want), "the popover draws {want:?}");
+    }
+    // Focus the rounds on the style.
+    click(&mut u, text_center(&painted, tr("Style")));
+    assert_eq!(u.app.session.prefs.agent_refine, AgentRefine::Style, "the style card is picked");
+    // Three rounds.
+    click(&mut u, text_center(&painted, "3"));
+    assert_eq!(u.app.session.prefs.agent_runs.1, 3, "the count chip sets how many rounds run");
+    assert_eq!(u.app.session.prefs.agent_runs.0, 1, "the agents count is untouched");
 }
 
 /// Refine rounds: when a turn ends well the chat asks its own worker for the next round — one

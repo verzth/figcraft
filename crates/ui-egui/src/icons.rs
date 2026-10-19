@@ -191,6 +191,14 @@ icons! {
     Agents,
     /// Refine rounds: two half-arrows chasing each other around a circle.
     Iterate,
+    /// Parallel agents splitting one design: a single frame cut into columns.
+    SplitWork,
+    /// Parallel agents side by side: two whole frames next to each other.
+    SideBySide,
+    /// Refining the layout: a wireframe — a frame with a header strip and a column divider.
+    Layout,
+    /// Refining the style: a painter's palette, a thumb hole and three paints.
+    Style,
 }
 
 /// Points along a circular arc from angle `a0` to `a1` (radians, y down: increasing is clockwise).
@@ -960,6 +968,31 @@ fn draw(p: &P, icon: Icon) {
             // A loop run again: two half-arrows chasing each other around the circle.
             p.arc_arrow(8.0, 8.0, 5.4, -PI + 0.5, -0.5);
             p.arc_arrow(8.0, 8.0, 5.4, 0.5, PI - 0.5);
+        }
+        SplitWork => {
+            // One design divided into slices: a single frame cut into columns.
+            p.rect(2.5, 3.5, 13.5, 12.5, 1.0);
+            p.line(6.2, 3.5, 6.2, 12.5);
+            p.line(9.8, 3.5, 9.8, 12.5);
+        }
+        SideBySide => {
+            // Two whole designs side by side, for comparison.
+            p.rect(2.5, 4.0, 7.5, 12.0, 1.0);
+            p.rect(8.5, 4.0, 13.5, 12.0, 1.0);
+        }
+        Layout => {
+            // A wireframe: a frame with a header strip and a column divider beneath it.
+            p.rect(2.5, 2.5, 13.5, 13.5, 1.0);
+            p.line(2.5, 6.5, 13.5, 6.5);
+            p.line(8.0, 6.5, 8.0, 13.5);
+        }
+        Style => {
+            // A painter's palette: a round board, a thumb hole, and three paints on it.
+            p.circle(8.0, 8.0, 5.2);
+            p.circle(5.6, 11.0, 1.5);
+            p.dot(6.2, 5.4, 1.0);
+            p.dot(9.8, 5.6, 1.0);
+            p.dot(10.6, 9.0, 1.0);
         }
         Clock => {
             p.circle(7.5, 7.5, 5.5);

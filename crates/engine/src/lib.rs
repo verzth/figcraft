@@ -667,8 +667,34 @@ pub struct Prefs {
     /// own chat), and how many refine rounds each one runs; the panel keeps both within
     /// 1..=4.
     pub agent_runs: (u32, u32),
+    /// How those parallel agents share the work (the composer's popover).
+    pub agent_parallel: AgentParallel,
+    /// What each agent's automatic refine rounds aim at.
+    pub agent_refine: AgentRefine,
     /// Preferences ▸ AI agents.
     pub agents: AgentPrefs,
+}
+
+/// How the parallel agents of one send share the work (the composer's "parallel agents" popover).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentParallel {
+    /// Each agent builds a complete design of its own — a side-by-side comparison.
+    #[default]
+    SideBySide,
+    /// The agents split one design between them, each taking a different slice of it.
+    SplitWork,
+}
+
+/// What an agent's automatic refine rounds aim at (the composer's "iteration" popover).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRefine {
+    /// Fix spacing, alignment, hierarchy and layout rhythm.
+    #[default]
+    Layout,
+    /// Fix colour, typography, visual weight and stylistic consistency.
+    Style,
 }
 
 /// Recently run actions kept for the Actions palette (newest first).
@@ -704,6 +730,8 @@ impl Default for Prefs {
             home_order: "desc".into(),
             recent_actions: Vec::new(),
             agent_runs: (1, 1),
+            agent_parallel: AgentParallel::default(),
+            agent_refine: AgentRefine::default(),
             agents: AgentPrefs::default(),
         }
     }

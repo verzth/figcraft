@@ -292,6 +292,20 @@ fn the_list_survives_a_restart_and_junk_in_the_preferences_file() {
     assert!(shared.edit.code.is_none() && shared.view.is_none());
 }
 
+/// The composer's agent modes live in the prefs: a file saved before they existed loads with
+/// the shipped defaults, and a chosen pair survives the save/load round trip.
+#[test]
+fn the_agent_composer_modes_load_old_prefs_and_roundtrip() {
+    use crate::{AgentParallel, AgentRefine};
+    // A prefs file from before the modes existed loads with the shipped defaults.
+    let old: Prefs = serde_json::from_value(json!({"theme": "dark"})).unwrap();
+    assert_eq!((old.agent_parallel, old.agent_refine), (AgentParallel::SideBySide, AgentRefine::Layout));
+    // A chosen pair survives the round trip.
+    let set = Prefs { agent_parallel: AgentParallel::SplitWork, agent_refine: AgentRefine::Style, ..old };
+    let back: Prefs = serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
+    assert_eq!((back.agent_parallel, back.agent_refine), (AgentParallel::SplitWork, AgentRefine::Style));
+}
+
 #[test]
 fn the_list_is_capped_and_the_file_opened_longest_ago_goes_first() {
     // More on disk than the cap: the first ones (most recently opened) are kept.

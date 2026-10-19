@@ -23,6 +23,7 @@ use figcraft_agent::OpenAiApi;
 use figcraft_agent::{
     AgentEvent, ApiKeys, Attachment, Backend, ClaudeCodeCli, CodexCli, MAX_IMAGE_BYTES, OpenCodeCli, Session, Turn, image_media_type,
 };
+use figcraft_engine::{AgentParallel, AgentRefine};
 
 use crate::FigApp;
 use crate::agent_models::{ModelChoice, Models, Route};
@@ -756,20 +757,8 @@ fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
                         // work in parallel (each in its own chat, the model picker chooses
                         // what they run) and how many refine rounds each one makes.
                         attach_button(app, ui, &t);
-                        let n = app.session.prefs.agent_runs.0.clamp(1, MAX_RUNS);
-                        let count = format!("×{n}");
-                        let hover = trf("{n} agents work in parallel, each in its own chat", &[("n", &n.to_string())]);
-                        if count_pill(ui, &t, crate::icons::Icon::Agents, &count, &hover) {
-                            app.session.prefs.agent_runs.0 = if n >= MAX_RUNS { 1 } else { n + 1 };
-                            app.services.save_prefs(&app.session.prefs);
-                        }
-                        let m = app.session.prefs.agent_runs.1.clamp(1, MAX_RUNS);
-                        let count = format!("×{m}");
-                        let hover = trf("{n} refine rounds per agent", &[("n", &m.to_string())]);
-                        if count_pill(ui, &t, crate::icons::Icon::Iterate, &count, &hover) {
-                            app.session.prefs.agent_runs.1 = if m >= MAX_RUNS { 1 } else { m + 1 };
-                            app.services.save_prefs(&app.session.prefs);
-                        }
+                        parallel_pill(app, ui, &t);
+                        iterate_pill(app, ui, &t);
                         // Right: the model picker, then the round send button (Stop while it works).
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                             if send_stop(ui, running, sendable, &t) {
@@ -828,9 +817,9 @@ fn attach_button(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
     }
 }
 
-/// A count pill in the controls row: its icon and "×N", stepping the count when clicked
-/// (1 → 2 → … → back to 1). The hover says what the count does.
-fn count_pill(ui: &mut Ui, t: &Tokens, icon: crate::icons::Icon, count: &str, hover: &str) -> bool {
+/// A pill in the controls row: its icon and "×N", opening a popover (returned as the response
+/// so the popup hangs off it). The hover says what the pill controls.
+fn pill(ui: &mut Ui, t: &Tokens, icon: crate::icons::Icon, count: &str, hover: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(46.0, 20.0), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::same(5), t.hover);
@@ -839,7 +828,154 @@ fn count_pill(ui: &mut Ui, t: &Tokens, icon: crate::icons::Icon, count: &str, ho
     ui.painter().text(pos2(rect.min.x + 21.0, rect.center().y), Align2::LEFT_CENTER, count, semibold(10.5), t.text);
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hover);
     crate::a11y::button(&resp, hover);
+    resp
+}
+
+/// The "parallel agents" pill: how many agents run at once and how they share the work.
+fn parallel_pill(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    let n = app.session.prefs.agent_runs.0.clamp(1, MAX_RUNS);
+    let hover = trf("{n} agents work in parallel, each in its own chat", &[("n", &n.to_string())]);
+    let resp = pill(ui, t, crate::icons::Icon::Agents, &format!("×{n}"), &hover);
+    egui::Popup::from_toggle_button_response(&resp)
+        .id(egui::Id::new("agent_parallel"))
+        .align(egui::RectAlign::TOP_START)
+        .width(232.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| parallel_menu(app, ui, t));
+}
+
+/// The "iteration" pill: how many refine rounds each agent runs and what they aim at.
+fn iterate_pill(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    let m = app.session.prefs.agent_runs.1.clamp(1, MAX_RUNS);
+    let hover = trf("{n} refine rounds per agent", &[("n", &m.to_string())]);
+    let resp = pill(ui, t, crate::icons::Icon::Iterate, &format!("×{m}"), &hover);
+    egui::Popup::from_toggle_button_response(&resp)
+        .id(egui::Id::new("agent_iterate"))
+        .align(egui::RectAlign::TOP_START)
+        .width(232.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| iterate_menu(app, ui, t));
+}
+
+/// The parallel-agents popover: how the agents share the work (two cards), then how many run.
+fn parallel_menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    ui.set_width(216.0);
+    section(ui, t, tr("Parallel agents"));
+    ui.label(RichText::new(tr("Let it cook")).font(regular(10.0)).color(t.text_secondary));
+    ui.add_space(8.0);
+    let now = app.session.prefs.agent_parallel;
+    let cards = [
+        (AgentParallel::SplitWork, crate::icons::Icon::SplitWork, tr("Split Work"), tr("Each agent takes a different slice.")),
+        (AgentParallel::SideBySide, crate::icons::Icon::SideBySide, tr("Side by side"), tr("Each agent designs its own version.")),
+    ];
+    for (i, (mode, icon, title, desc)) in cards.into_iter().enumerate() {
+        if i > 0 {
+            ui.add_space(6.0);
+        }
+        if mode_card(ui, t, icon, title, desc, now == mode) {
+            app.session.prefs.agent_parallel = mode;
+            app.services.save_prefs(&app.session.prefs);
+        }
+    }
+    ui.add_space(10.0);
+    section(ui, t, tr("Agents"));
+    let n = app.session.prefs.agent_runs.0.clamp(1, MAX_RUNS) as usize;
+    let labels: Vec<String> = (1..=MAX_RUNS).map(|i| i.to_string()).collect();
+    if let Some(pick) = choice_row(ui, t, &labels, n - 1) {
+        app.session.prefs.agent_runs.0 = (pick + 1) as u32;
+        app.services.save_prefs(&app.session.prefs);
+    }
+}
+
+/// The iteration popover: what the refine rounds fix (layout or style), then how many run.
+fn iterate_menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    ui.set_width(216.0);
+    section(ui, t, tr("Iteration"));
+    let now = app.session.prefs.agent_refine;
+    let cards = [
+        (AgentRefine::Layout, crate::icons::Icon::Layout, tr("Layout"), tr("Spacing, alignment and hierarchy.")),
+        (AgentRefine::Style, crate::icons::Icon::Style, tr("Style"), tr("Colour, typography and visual weight.")),
+    ];
+    for (i, (mode, icon, title, desc)) in cards.into_iter().enumerate() {
+        if i > 0 {
+            ui.add_space(6.0);
+        }
+        if mode_card(ui, t, icon, title, desc, now == mode) {
+            app.session.prefs.agent_refine = mode;
+            app.services.save_prefs(&app.session.prefs);
+        }
+    }
+    ui.add_space(10.0);
+    section(ui, t, tr("Variants"));
+    let m = app.session.prefs.agent_runs.1.clamp(1, MAX_RUNS) as usize;
+    if let Some(pick) = choice_row(ui, t, &variant_labels(), m - 1) {
+        app.session.prefs.agent_runs.1 = (pick + 1) as u32;
+        app.services.save_prefs(&app.session.prefs);
+    }
+}
+
+/// A small section label at the top of a popover group.
+fn section(ui: &mut Ui, t: &Tokens, text: &str) {
+    ui.label(RichText::new(text).font(semibold(9.5)).color(t.text_secondary));
+    ui.add_space(4.0);
+}
+
+/// A selectable card in a popover: an icon, a title and a line describing it; the chosen one
+/// is filled and outlined in the accent colour.
+fn mode_card(ui: &mut Ui, t: &Tokens, icon: crate::icons::Icon, title: &str, desc: &str, selected: bool) -> bool {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
+    let bg = if selected {
+        t.selected_row
+    } else if resp.hovered() {
+        t.hover
+    } else {
+        t.field
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(8), bg);
+    let stroke = if selected { Stroke::new(1.5, t.accent) } else { Stroke::new(1.0, t.border) };
+    ui.painter().rect_stroke(rect, CornerRadius::same(8), stroke, egui::StrokeKind::Inside);
+    let icon_col = if selected { t.accent_text } else { t.text_secondary };
+    crate::icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.min.x + 21.0, rect.center().y), vec2(16.0, 16.0)), icon, icon_col);
+    let text_x = rect.min.x + 40.0;
+    ui.painter().text(pos2(text_x, rect.min.y + 15.0), Align2::LEFT_CENTER, title, semibold(11.0), t.text);
+    let room = (rect.width() - 48.0).max(20.0);
+    let desc = widgets::elide_font(ui, desc, room, regular(9.5));
+    ui.painter().text(pos2(text_x, rect.min.y + 32.0), Align2::LEFT_CENTER, desc, regular(9.5), t.text_secondary);
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    crate::a11y::button(&resp, title);
     resp.clicked()
+}
+
+/// A row of small selectable chips; the chosen one is filled. Returns the picked index.
+fn choice_row(ui: &mut Ui, t: &Tokens, labels: &[String], selected: usize) -> Option<usize> {
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (i, label) in labels.iter().enumerate() {
+            let chosen = i == selected;
+            let (bg, fg) = if chosen { (t.accent, Color32::WHITE) } else { (t.field, t.text_secondary) };
+            let resp = ui.add(
+                egui::Button::new(RichText::new(label).font(regular(10.5)).color(fg))
+                    .fill(bg)
+                    .corner_radius(CornerRadius::same(6))
+                    .min_size(vec2(0.0, 24.0)),
+            );
+            if resp.clicked() {
+                picked = Some(i);
+            }
+        }
+    });
+    picked
+}
+
+/// The refine-round choices: "Don't iterate" for a single round, then the count.
+fn variant_labels() -> Vec<String> {
+    let mut out = vec![tr("Don't iterate").to_string()];
+    for i in 2..=MAX_RUNS {
+        out.push(i.to_string());
+    }
+    out
 }
 
 /// Take files dropped onto the panel: an image's bytes travel with the next send, and a
@@ -1056,6 +1192,19 @@ fn send_turn(app: &mut FigApp, ctx: &egui::Context) {
     // refine rounds, all on the same prompt and the same model.
     let count = app.session.prefs.agent_runs.0.clamp(1, MAX_RUNS) as usize;
     let rounds = app.session.prefs.agent_runs.1.clamp(1, MAX_RUNS);
+    // Several agents: say once, on every one's prompt, how they share the work.
+    if count > 1 {
+        let mode = match app.session.prefs.agent_parallel {
+            AgentParallel::SideBySide => {
+                trf("{n} agents work side by side on the same request — each builds a complete, independent design.", &[("n", &count.to_string())])
+            }
+            AgentParallel::SplitWork => {
+                trf("{n} agents split one design between them — each takes a different slice of it.", &[("n", &count.to_string())])
+            }
+        };
+        text.push_str(&format!("\n\n{mode}"));
+        shown.push_str(&format!("\n\n{mode}"));
+    }
     let mut started = 0;
     for i in 0..count {
         let idx = if i == 0 {
@@ -1333,8 +1482,17 @@ pub(crate) fn poll(app: &mut FigApp, ctx: &egui::Context) {
 /// the same worker. Only a chat with a live worker and rounds left goes again — a chat come
 /// back from the history has no worker to ask, and its rounds end here.
 pub(crate) fn refine_once(app: &mut FigApp, ctx: &egui::Context, idx: usize) -> bool {
-    let text = tr("Review the canvas and your last changes, then refine the design: fix rough edges and improve hierarchy, spacing and consistency.")
-        .to_string();
+    // What a refine round asks for, set by the composer's iteration popover: the layout
+    // rounds fix spacing and hierarchy, the style rounds fix colour and typography.
+    let text = match app.session.prefs.agent_refine {
+        AgentRefine::Layout => {
+            tr("Review the canvas and your last changes, then refine the layout: fix spacing, alignment, hierarchy and the rhythm between elements.")
+        }
+        AgentRefine::Style => {
+            tr("Review the canvas and your last changes, then refine the style: fix colour, typography, visual weight and consistency.")
+        }
+    }
+    .to_string();
     let Some(chat) = app.ui.agent.chats.get_mut(idx) else { return false };
     if chat.running || chat.rounds_left == 0 {
         return false;
