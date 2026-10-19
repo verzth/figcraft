@@ -3,7 +3,7 @@
 
 use figcraft_agent::AgentEvent;
 
-use crate::agent_panel::{Chat, Pending, Row, apply, fmt_tokens, one_line, short_tool_name};
+use crate::agent_panel::{Chat, Cmd, Link, Pending, Row, apply, fmt_tokens, hist_stamp, one_line, refine_once, short_tool_name, take_file};
 use crate::agents::BackendKind;
 use crate::i18n::tr;
 
@@ -62,8 +62,7 @@ fn a_result_with_no_visible_call_still_gets_a_row() {
 
 #[test]
 fn done_clears_running_and_only_a_surprising_reason_says_so() {
-    let mut chat = Chat::default();
-    chat.running = true;
+    let mut chat = Chat { running: true, ..Chat::default() };
     apply(&mut chat, AgentEvent::Tokens { input: 10, output: 20 });
     apply(&mut chat, AgentEvent::Done { reason: "success".into() });
     assert!(!chat.running, "the turn ended");
@@ -80,8 +79,7 @@ fn done_clears_running_and_only_a_surprising_reason_says_so() {
 
 #[test]
 fn a_failed_backend_ends_the_turn_and_says_why() {
-    let mut chat = Chat::default();
-    chat.running = true;
+    let mut chat = Chat { running: true, ..Chat::default() };
     apply(&mut chat, AgentEvent::Failed("Claude Code was not found on this computer.".into()));
     assert!(!chat.running);
     assert_eq!(chat.rows, vec![Row::Error("Claude Code was not found on this computer.".into())]);
@@ -119,6 +117,8 @@ fn a_chat_survives_the_history_json_whole_and_without_its_live_link() {
     chat.tokens = Some((1200, 34));
     chat.kind = Some(BackendKind::ClaudeCode);
     chat.created = 1_760_000_000.0;
+    chat.variant = 3;
+    chat.rounds_left = 2;
     let json = serde_json::to_string(&chat).expect("a chat serializes");
     assert!(!json.contains("link"), "the live worker never rides along: {json}");
     let back: Chat = serde_json::from_str(&json).expect("the same chat reads back");
@@ -127,6 +127,8 @@ fn a_chat_survives_the_history_json_whole_and_without_its_live_link() {
     assert_eq!(back.tokens, chat.tokens);
     assert_eq!(back.kind, chat.kind);
     assert_eq!(back.created, chat.created);
+    assert_eq!(back.variant, chat.variant);
+    assert_eq!(back.rounds_left, chat.rounds_left);
 }
 
 /// A chat is named after its first real words, elided when the thought runs long.
@@ -139,11 +141,30 @@ fn a_chat_is_named_after_its_first_words_and_elides_long_thoughts() {
     assert_eq!(chat.title(), "Real ask");
     chat.rows.insert(0, Row::User("m".repeat(60)));
     assert_eq!(chat.title(), format!("{}…", "m".repeat(48)));
+    // A parallel variant says so in its name, so chats from one send can be told apart.
+    chat.rows.truncate(1);
+    chat.variant = 2;
+    assert_eq!(chat.title(), format!("{}… · 2", "m".repeat(48)));
+}
+
+/// A history entry's stamp: the clock time for today, "Yesterday", then a day count — so several
+/// chats that all fall back to "New Agent" still tell apart in the list.
+#[test]
+fn a_history_stamp_reads_as_a_clock_time_today_and_a_day_count_after() {
+    let day = 86_400.0;
+    let now = 12.5 * day;
+    // Today: the same UTC day, shown as the clock time it was opened.
+    assert_eq!(hist_stamp(12.0 * day + 3661.0, now), "01:01");
+    // One day back reads "Yesterday".
+    assert_eq!(hist_stamp(now - day - 500.0, now), "Yesterday");
+    // Older still: the day count.
+    assert_eq!(hist_stamp(now - 2.0 * day, now), "2d");
+    assert_eq!(hist_stamp(now - 10.0 * day, now), "10d");
 }
 
 // --- The tab drawn headless: the pen.dev layout, its dropdown, and the send rules. ---
 
-use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, Shape, pos2};
+use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, Shape};
 use figcraft_engine::Session;
 
 use crate::layers_drag_tests::Ui;
@@ -161,18 +182,24 @@ fn tab() -> Ui {
 /// (lib.rs) and the panel is asked for `left_width`. The shapes are taken by clip rect rather
 /// than by folding over every rect in the frame — the rail, the canvas and the right panel all
 /// paint their own shapes past these edges, so a check over the whole frame's shapes holds no
-/// matter what the panel does.
+/// matter what the panel does. The returned rect is the widest of those clip rects, i.e. the
+/// panel's own area (top to bottom included), against which its rows keep their padding.
 fn panel_shapes(u: &mut Ui) -> (Vec<Shape>, Rect) {
     u.frame(vec![]);
     let (left, right) = (56.0, 56.0 + u.app.ui.left_width);
     let mut painted = Vec::new();
+    let mut panel = Rect::NOTHING;
     for clipped in &u.frame_output(vec![]).shapes {
         let clip = clipped.clip_rect;
         if clip.min.x >= left - 0.5 && clip.max.x <= right + 0.5 {
             painted.extend(flat(std::slice::from_ref(clipped)));
+            // The rows inside the scroll area (and any popup) clip tighter than the panel.
+            if clip.area() > panel.area() {
+                panel = clip;
+            }
         }
     }
-    (painted, Rect::from_min_max(pos2(left, 0.0), pos2(right, 0.0)))
+    (painted, panel)
 }
 
 /// Nothing in the panel may start left of the content edge: in the header's right-to-left row a
@@ -204,8 +231,9 @@ fn no_text_runs_past_the_panel() {
 
 /// The panel at its narrow default width with a CLI actually installed — the state the shipped
 /// app is in. The session name stays whole, the status beside it steps aside rather than
-/// squeezing the dropdown, and the field's two ends (which CLI, which model) sit on their own
-/// row under the draft instead of being shoved past the panel's right edge.
+/// squeezing the dropdown, and the field's two ends (attach and the send's counts at the left,
+/// the model at the right) sit on their own row under the draft instead of being shoved past
+/// the panel's right edge.
 #[test]
 fn with_a_backend_the_names_stay_inside_the_panel() {
     let mut u = tab();
@@ -214,7 +242,13 @@ fn with_a_backend_the_names_stay_inside_the_panel() {
     u.app.ui.agent.resolved = true;
     let (painted, span) = panel_shapes(&mut u);
     assert!(has_text(&painted, "New Agent"), "the session name is whole beside the status");
-    assert!(has_text(&painted, "Claude Code"), "the CLI's name draws in the field's controls row");
+    // The counts draw fresh as "×1" twice — parallel agents first, refine rounds beside it.
+    // The CLI's name no longer takes the row: the model picker routes it.
+    assert_eq!(
+        crate::live_tests::texts(&painted).iter().filter(|(t, _, _)| t == "×1").count(),
+        2,
+        "the parallel-agents and refine-rounds counts draw in the field's controls row"
+    );
     for (text, at, size) in crate::live_tests::texts(&painted) {
         assert!(at.x >= span.min.x - 0.5, "{text:?} starts at x={} inside the panel's left edge x={}", at.x, span.min.x);
         assert!(at.x + size.x <= span.max.x + 0.5, "{text:?} ends at x={} past the panel's right edge x={}", at.x + size.x, span.max.x);
@@ -236,6 +270,70 @@ fn elided_center(s: &[Shape], prefix: &str) -> Pos2 {
 
 fn has_prefix(s: &[Shape], prefix: &str) -> bool {
     crate::live_tests::texts(s).iter().any(|(t, _, _)| t.starts_with(prefix))
+}
+
+/// The history dropdown lays out at a pinned width: `Popup::width` only seeds a default and the
+/// area then shrinks to its content's min size, which could clip the long "Clear Agent History"
+/// row. `history_menu` pins the content width instead, so the frame stays wide enough for every
+/// row (a regression: the popup once collapsed to its content and clipped the clear row).
+#[test]
+fn the_history_popup_stays_wide_enough_to_fit_its_clear_row() {
+    let mut u = tab();
+    egui::Popup::open_id(&u.ctx, egui::Id::new("agent_sessions"));
+    // The popup's first frame is an invisible sizing pass; it appears on the next.
+    u.frame_output(vec![]);
+    let out = u.frame_output(vec![]);
+
+    // The popup's own frame background: the widest rect that starts just right of the rail and
+    // drops below the header row (chat rows are inset a further 8 and are narrower than it).
+    let mut frame_rect: Option<Rect> = None;
+    let mut clear: Option<(f32, f32)> = None;
+    let mut title_seen = false;
+    for clipped in &out.shapes {
+        let shapes = crate::live_tests::flat(std::slice::from_ref(clipped));
+        for s in &shapes {
+            if let Shape::Rect(rs) = s {
+                let r = rs.rect;
+                if r.min.x > 60.0 && r.min.x < 120.0 && r.min.y > 80.0 && r.width() > 200.0 {
+                    frame_rect = Some(frame_rect.map_or(r, |f: Rect| f.union(r)));
+                }
+            }
+        }
+        for (t, p, size) in crate::live_tests::texts(&shapes) {
+            if t == tr("Clear Agent History") {
+                clear = Some((p.x, p.x + size.x));
+            }
+            if t == tr("New Agent") {
+                title_seen = true;
+            }
+        }
+    }
+    assert!(title_seen, "the dropdown lists a chat");
+    let frame = frame_rect.expect("the popup drew its frame background");
+    assert!(frame.width() >= 250.0, "the popup kept a usable width, got {}", frame.width());
+    let (clear_left, clear_right) = clear.expect("the popup drew its clear-history row");
+    assert!(clear_right <= frame.max.x, "Clear Agent History fits inside the popup ({clear_right} vs {})", frame.max.x);
+    assert!(clear_left >= frame.min.x, "the clear row starts inside the popup");
+}
+
+/// The three history groups don't overlap: a chat from today lists under "Today" alone. The
+/// predicates once fell through ("Previous 7 days" also matched today, "Older" matched
+/// everything), so one conversation showed up beneath all three headings at once.
+#[test]
+fn a_todays_chat_lists_under_today_alone_not_under_every_group() {
+    let mut u = tab();
+    egui::Popup::open_id(&u.ctx, egui::Id::new("agent_sessions"));
+    // The popup's first frame is an invisible sizing pass; it appears on the next.
+    u.frame_output(vec![]);
+    let out = u.frame_output(vec![]);
+    let mut painted: Vec<String> = Vec::new();
+    for clipped in &out.shapes {
+        let shapes = crate::live_tests::flat(std::slice::from_ref(clipped));
+        painted.extend(crate::live_tests::texts(&shapes).into_iter().map(|(t, _, _)| t));
+    }
+    assert!(painted.iter().any(|t| t == tr("Today")), "the fresh chat is listed under Today");
+    assert!(!painted.iter().any(|t| t == tr("Previous 7 days")), "a today chat isn't also under the 7-day group");
+    assert!(!painted.iter().any(|t| t == tr("Older")), "a today chat isn't also under Older");
 }
 
 /// Press and release at `p` (a frame each).
@@ -322,4 +420,156 @@ fn an_image_drop_draws_a_chip_and_survives_a_refusal() {
     assert!(has_text(&s, "The AI agents server is not running. Turn it on in Preferences ▸ AI agents."));
     assert_eq!(u.app.ui.agent.draft, "Lihat skema", "a refused turn gives the words back");
     assert_eq!(u.app.ui.agent.attachments.len(), 1, "a refused turn keeps the drop");
+}
+
+// --- The send's shape: attach, parallel agents, refine rounds. ---
+
+/// The `set_max_width` trap: it resets the row's cursor, so padding added after it was
+/// silently thrown away — the note and the field sat flush against the panel's edge while
+/// the rows around them kept theirs.
+#[test]
+fn the_empty_states_content_sits_inside_the_padding() {
+    let mut u = tab();
+    let (painted, span) = panel_shapes(&mut u);
+    for wanted in ["Ask me to design anything", "Attach context files.", "Drop a DESIGN.md", "Design anything…"] {
+        let (_, at, _) = crate::live_tests::texts(&painted)
+            .into_iter()
+            .find(|(t, _, _)| t.starts_with(wanted))
+            .unwrap_or_else(|| panic!("no text starting {wanted:?}"));
+        assert!(
+            at.x >= span.min.x + crate::widgets::PAD - 0.5,
+            "{wanted:?} starts at x={} outside the panel's {}px content padding (edge x={})",
+            at.x,
+            crate::widgets::PAD,
+            span.min.x
+        );
+    }
+}
+
+/// The panel frame carries no margin of its own (`lib.rs` draws it `Frame::NONE`), so the tab's
+/// own rows keep the vertical padding: the header must not touch the tab bar above it and the
+/// composer must not touch the window's bottom edge. Painted content therefore stays `PAD` clear
+/// of both panel edges — checked over every shape the panel paints, not just the texts, so the
+/// field's own frame and the send button are held to the same rule.
+#[test]
+fn no_painted_content_touches_the_panels_top_or_bottom_edge() {
+    let mut u = tab();
+    let (painted, span) = panel_shapes(&mut u);
+    assert!(has_text(&painted, "New chat"), "the panel's own shapes are found by their clip rect");
+    // The panel's own background fill spans its whole area; skip it and measure what's on it.
+    let content: Vec<Rect> = painted
+        .iter()
+        .filter_map(|s| match s {
+            Shape::Rect(r) if r.rect.height() < span.height() - 1.0 => Some(r.rect),
+            _ => None,
+        })
+        .collect();
+    let pad = crate::widgets::PAD;
+    let top = content.iter().map(|r| r.min.y).fold(f32::INFINITY, f32::min);
+    let bottom = content.iter().map(|r| r.max.y).fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        top >= span.min.y + pad - 0.5,
+        "painted content starts {top}px from the window top, inside the panel's {pad}px vertical padding (edge y={})",
+        span.min.y
+    );
+    assert!(
+        bottom <= span.max.y - pad + 0.5,
+        "painted content ends at {bottom}px, inside the panel's {pad}px vertical padding (bottom edge y={})",
+        span.max.y
+    );
+}
+
+/// The middle of the `n`th count drawn in the controls row (0: the agents pill, left of the
+/// rounds pill). Counts are "×2"-shaped; a chip's "× name" never counts.
+fn count_center(s: &[Shape], n: usize) -> Pos2 {
+    let (_, p, size) = crate::live_tests::texts(s)
+        .into_iter()
+        .filter(|(t, _, _)| t.strip_prefix('×').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit())))
+        .nth(n)
+        .unwrap_or_else(|| panic!("no count pill {n} drawn"));
+    p + size / 2.0
+}
+
+/// The first count in the controls row steps with a click — parallel agents, one at a time —
+/// and wraps back to one past its cap; the rounds count beside it is untouched. Both live in
+/// the saved prefs, so the shape of the next send is remembered.
+#[test]
+fn the_parallel_agents_count_steps_and_wraps() {
+    let mut u = tab();
+    assert_eq!(u.app.session.prefs.agent_runs, (1, 1), "one agent, one round by default");
+    for want in [2, 3, 4, 1] {
+        let s = drawn(&mut u);
+        click(&mut u, count_center(&s, 0));
+        assert_eq!(u.app.session.prefs.agent_runs.0, want, "the agents count steps and wraps");
+        assert_eq!(u.app.session.prefs.agent_runs.1, 1, "the rounds count is untouched");
+    }
+}
+
+/// …and so does the second: how many refine rounds each agent runs.
+#[test]
+fn the_refine_rounds_count_steps_and_wraps() {
+    let mut u = tab();
+    for want in [2, 3, 4, 1] {
+        let s = drawn(&mut u);
+        click(&mut u, count_center(&s, 1));
+        assert_eq!(u.app.session.prefs.agent_runs.1, want, "the rounds count steps and wraps");
+        assert_eq!(u.app.session.prefs.agent_runs.0, 1, "the agents count is untouched");
+    }
+}
+
+/// Refine rounds: when a turn ends well the chat asks its own worker for the next round — one
+/// round at a time — and a chat without a live worker (one come back from the history) ends
+/// its rounds instead of asking nobody.
+#[test]
+fn a_chat_with_rounds_left_asks_itself_for_the_next_round() {
+    let mut u = tab();
+    u.app.ui.agent.chats.push(Chat::default());
+    let idx = u.app.ui.agent.chats.len() - 1;
+    let (tx_cmd, rx_cmd) = std::sync::mpsc::channel();
+    let (tx_ev, rx_ev) = std::sync::mpsc::channel();
+    {
+        let chat = &mut u.app.ui.agent.chats[idx];
+        chat.link = Some(Link { cmd: tx_cmd, events: rx_ev });
+        chat.rounds_left = 1;
+        chat.rows.push(Row::User("Design a hero".into()));
+    }
+    let ctx = egui::Context::default();
+    assert!(refine_once(&mut u.app, &ctx, idx), "the promised round was asked for");
+    let chat = &u.app.ui.agent.chats[idx];
+    assert_eq!(chat.rounds_left, 0, "one round at a time");
+    assert!(chat.running, "the worker is on the round");
+    assert!(matches!(chat.rows.last(), Some(Row::User(_))), "the round shows on the transcript");
+    let cmd = rx_cmd.try_recv().expect("the refine turn reached the worker");
+    let Cmd::Turn(turn) = cmd else { panic!("a turn, not a stop") };
+    assert!(turn.text.contains("refine"), "the prompt asks for a refinement: {}", turn.text);
+    drop(tx_ev);
+    // No rounds left: nothing more is asked, of a busy worker least of all.
+    assert!(!refine_once(&mut u.app, &ctx, idx));
+    // A chat with no live worker ends its rounds instead of asking nobody.
+    u.app.ui.agent.chats[idx].link = None;
+    u.app.ui.agent.chats[idx].rounds_left = 2;
+    u.app.ui.agent.chats[idx].running = false;
+    assert!(!refine_once(&mut u.app, &ctx, idx));
+    assert_eq!(u.app.ui.agent.chats[idx].rounds_left, 0, "the rounds end with the worker");
+}
+
+/// The attach button's pick lands exactly as a drop does — the text joins the next message —
+/// and never queues past the drops' cap.
+#[test]
+fn a_picked_file_becomes_pending_like_a_drop() {
+    let path = std::env::temp_dir().join("figcraft-attach-pick.md");
+    std::fs::write(&path, "# Notes\nthe body").expect("a scratch file");
+    let mut u = tab();
+    take_file(&mut u.app, &path);
+    let [Pending::Text { name, content }] = u.app.ui.agent.attachments.as_slice() else {
+        panic!("one text file waits for the next send");
+    };
+    assert_eq!(name, "figcraft-attach-pick.md");
+    assert!(content.contains("the body"), "the text is what a drop would carry");
+    while u.app.ui.agent.attachments.len() < crate::agent_panel::MAX_DROPS {
+        u.app.ui.agent.attachments.push(Pending::Text { name: "extra.txt".into(), content: String::new() });
+    }
+    take_file(&mut u.app, &path);
+    assert_eq!(u.app.ui.agent.attachments.len(), crate::agent_panel::MAX_DROPS, "the drop cap holds");
+    std::fs::remove_file(&path).ok();
 }

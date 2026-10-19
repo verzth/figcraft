@@ -142,6 +142,8 @@ status = "draft — needs native review"
 "Ask in your words" = "Pide con tus palabras"
 "Asking the server…" = "Consultando al servidor…"
 "Assets" = "Recursos"
+"Attach a file" = "Adjuntar un archivo"
+"Attach context file" = "Adjuntar un archivo de contexto"
 "Attach context files." = "Adjunta archivos de contexto."
 "Aug" = "ago"
 "Auto" = "Auto"
@@ -342,6 +344,7 @@ status = "draft — needs native review"
 "Corner smoothing" = "Suavizado de esquinas"
 "Couldn't install FigCraft in {client}: {error}" = "No se pudo instalar FigCraft en {client}: {error}"
 "Couldn't reach {server}: showing what this computer remembers." = "No se pudo contactar con {server}: se muestra lo que este ordenador recuerda."
+"Couldn't read that file." = "No se pudo leer ese archivo."
 "Couldn't remove FigCraft from {client}: {error}" = "No se pudo quitar FigCraft de {client}: {error}"
 "Couldn't save automatically: {error}" = "No se pudo guardar automáticamente: {error}"
 "Couldn't switch to port {port}" = "No se pudo cambiar al puerto {port}"
@@ -1187,6 +1190,7 @@ status = "draft — needs native review"
 "Reverse the order" = "Invertir el orden"
 "Reversed triangle" = "Triángulo invertido"
 "Review and merge" = "Revisar y fusionar"
+"Review the canvas and your last changes, then refine the design: fix rough edges and improve hierarchy, spacing and consistency." = "Revisa el lienzo y tus últimos cambios, y refina el diseño: corrige los bordes ásperos y mejora la jerarquía, el espaciado y la coherencia."
 "Ribbon" = "Cinta"
 "Right" = "Derecha"
 "Right side" = "Lado derecho"
@@ -1395,7 +1399,6 @@ status = "draft — needs native review"
 "Swapped {n} assets" = { one = "{n} recurso intercambiado", other = "{n} recursos intercambiados" }
 "Swapped {n} assets; {missed} had no match and still use the old library" = { one = "{n} recurso intercambiado; {missed} sin coincidencia siguen usando la biblioteca anterior", other = "{n} recursos intercambiados; {missed} sin coincidencia siguen usando la biblioteca anterior" }
 "Sweep" = "Barrido"
-"Switch to {name}" = "Cambiar a {name}"
 "System" = "Sistema"
 "Tab / Shift+Tab" = "Tab / Shift+Tab"
 "Table" = "Tabla"
@@ -1724,6 +1727,7 @@ status = "draft — needs native review"
 "{name}, online, open only to you" = "{name}, en línea, abierto solo para ti"
 "{name}, {kind}, {w} by {h}, selected" = "{name}, {kind}, {w} por {h}, seleccionado"
 "{n} added" = { one = "{n} añadida", other = "{n} añadidas" }
+"{n} agents work in parallel, each in its own chat" = "{n} agentes trabajan en paralelo, cada uno en su propio chat"
 "{n} autosave versions" = { one = "{n} versión autoguardada", other = "{n} versiones autoguardadas" }
 "{n} changed" = { one = "{n} cambiada", other = "{n} cambiadas" }
 "{n} columns" = { one = "{n} columna", other = "{n} columnas" }
@@ -1749,6 +1753,7 @@ status = "draft — needs native review"
 "{n} people joined" = { one = "{n} persona se ha unido", other = "{n} personas se han unido" }
 "{n} preferred components" = { one = "{n} componente preferido", other = "{n} componentes preferidos" }
 "{n} ready" = { one = "{n} listo", other = "{n} listos" }
+"{n} refine rounds per agent" = "{n} rondas de refinamiento por agente"
 "{n} removed" = { one = "{n} eliminada", other = "{n} eliminadas" }
 "{n} replies" = { one = "{n} respuesta", other = "{n} respuestas" }
 "{n} rows" = { one = "{n} fila", other = "{n} filas" }

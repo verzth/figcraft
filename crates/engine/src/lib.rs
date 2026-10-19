@@ -663,6 +663,10 @@ pub struct Prefs {
     /// `widget:<plugin>`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_actions: Vec<String>,
+    /// The Agent tab's composer: how many agents work in parallel on one send (each in its
+    /// own chat), and how many refine rounds each one runs; the panel keeps both within
+    /// 1..=4.
+    pub agent_runs: (u32, u32),
     /// Preferences ▸ AI agents.
     pub agents: AgentPrefs,
 }
@@ -699,6 +703,7 @@ impl Default for Prefs {
             home_sort: "modified".into(),
             home_order: "desc".into(),
             recent_actions: Vec::new(),
+            agent_runs: (1, 1),
             agents: AgentPrefs::default(),
         }
     }

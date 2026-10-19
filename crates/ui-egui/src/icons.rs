@@ -187,6 +187,10 @@ icons! {
     LiveShared,
     /// A file of yours on a server that only you get into: a point inside a closed ring.
     LivePrivate,
+    /// Parallel agents: two sparkles, one large and one small.
+    Agents,
+    /// Refine rounds: two half-arrows chasing each other around a circle.
+    Iterate,
 }
 
 /// Points along a circular arc from angle `a0` to `a1` (radians, y down: increasing is clockwise).
@@ -946,6 +950,16 @@ fn draw(p: &P, icon: Icon) {
         LivePrivate => {
             p.dot(8.0, 8.0, 1.6);
             p.circle(8.0, 8.0, 5.0);
+        }
+        Agents => {
+            // Two sparkles: the big one working, the small one keeping it company.
+            p.fill(&[(6.5, 4.5), (7.4, 8.6), (11.5, 9.5), (7.4, 10.4), (6.5, 14.5), (5.6, 10.4), (1.5, 9.5), (5.6, 8.6)]);
+            p.fill(&[(12.0, 1.4), (12.7, 3.3), (14.6, 4.0), (12.7, 4.7), (12.0, 6.6), (11.3, 4.7), (9.4, 4.0), (11.3, 3.3)]);
+        }
+        Iterate => {
+            // A loop run again: two half-arrows chasing each other around the circle.
+            p.arc_arrow(8.0, 8.0, 5.4, -PI + 0.5, -0.5);
+            p.arc_arrow(8.0, 8.0, 5.4, 0.5, PI - 0.5);
         }
         Clock => {
             p.circle(7.5, 7.5, 5.5);

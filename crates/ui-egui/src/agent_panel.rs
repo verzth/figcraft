@@ -34,16 +34,28 @@ use crate::widgets;
 
 /// How often a conversation's worker wakes to check for commands.
 const POLL_MS: u64 = 30;
-/// The input block's height below the transcript (field + controls row), so the input sits at
-/// the panel's bottom edge; slightly generous to keep the outer scroll area from appearing.
+/// The input block's height below the transcript (field + controls row), so the input sits
+/// [`EDGE_PAD`] clear of the panel's bottom edge; slightly generous to keep the outer scroll
+/// area from appearing.
 const INPUT_H: f32 = 100.0;
+/// The content's distance from the panel's top and bottom edges: the frame carries no margin
+/// of its own (`lib.rs` draws it `Frame::NONE`), so the tab insets its own rows — the same
+/// padding the sides already use.
+const EDGE_PAD: f32 = widgets::PAD;
 /// Extra input-block height for the setup note above the field, and for the drop chips.
 const ERROR_H: f32 = 40.0;
 const DROPS_H: f32 = 36.0;
 /// Attachments: at most this many (text files and images together), each text file read
 /// to at most [`MAX_DROP_CHARS`] characters and each image to [`MAX_IMAGE_BYTES`] bytes.
-const MAX_DROPS: usize = 4;
+/// The attach and drop cap: at most this many files wait for the next send.
+pub(crate) const MAX_DROPS: usize = 4;
 const MAX_DROP_CHARS: usize = 32_768;
+/// The composer's counts: at most this many agents run in parallel on one send, and this
+/// many refine rounds each of them runs.
+const MAX_RUNS: u32 = 4;
+/// What the attach button offers: text files whose text joins the message, and images that
+/// travel with the turn (the same two kinds the panel accepts as drops).
+const ATTACH_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "json", "csv", "yaml", "yml", "toml", "svg", "png", "jpg", "jpeg", "webp", "gif"];
 
 /// One transcript row.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -74,8 +86,14 @@ pub struct Chat {
     pub kind: Option<BackendKind>,
     /// When the chat was opened (epoch seconds; the history groups days from it).
     pub created: f64,
+    /// Which parallel variant of one send this chat is: 1…n when a send runs several agents
+    /// at once, 0 for a chat of its own. The history names it "… · n".
+    pub variant: usize,
+    /// Refine rounds this agent still runs by itself after a turn completes.
+    pub rounds_left: u32,
+    /// The live worker (never saved; crate-visible so a test can play the worker).
     #[serde(skip)]
-    link: Option<Link>,
+    pub(crate) link: Option<Link>,
 }
 
 impl Chat {
@@ -100,16 +118,21 @@ impl Chat {
                 }
                 out.push(ch);
             }
+            // A parallel variant says so after the words, so chats from one send tell apart.
+            if self.variant > 0 {
+                out.push_str(&format!(" · {}", self.variant));
+            }
             return out;
         }
         tr("New Agent").to_string()
     }
 }
 
-/// The worker thread's ends. Dropping it tells the thread to stop.
-struct Link {
-    cmd: Sender<Cmd>,
-    events: Receiver<AgentEvent>,
+/// The worker thread's ends. Dropping it tells the thread to stop. (Crate-visible so the
+/// tests can play the worker: hold a channel end and speak into it.)
+pub(crate) struct Link {
+    pub(crate) cmd: Sender<Cmd>,
+    pub(crate) events: Receiver<AgentEvent>,
 }
 
 impl Drop for Link {
@@ -118,7 +141,7 @@ impl Drop for Link {
     }
 }
 
-enum Cmd {
+pub(crate) enum Cmd {
     Turn(Turn),
     Cancel,
     Shutdown,
@@ -224,6 +247,8 @@ pub fn panel(app: &mut FigApp, ui: &mut Ui) {
     }
     let ctx = ui.ctx().clone();
     dropped(app, &ctx);
+    // The frame carries no margin, so the header keeps its own distance from the top edge.
+    ui.add_space(EDGE_PAD);
     header(app, ui);
     transcript(app, ui);
     input(app, ui, &ctx);
@@ -370,18 +395,42 @@ fn session_trigger(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
 /// One history group: its label, and the test that decides which chats belong to it.
 type HistoryGroup = (&'static str, Box<dyn Fn(f64) -> bool>);
 
+/// A short stamp beside a history entry so chats inside one group tell apart: the clock time for
+/// today, "Yesterday", then the day count. Several new chats all fall back to "New Agent", so
+/// only their time separates them in the list.
+pub(crate) fn hist_stamp(created: f64, now: f64) -> String {
+    let day = 86_400.0;
+    let days = ((now / day).floor() - (created / day).floor()).max(0.0) as i64;
+    if days <= 0 {
+        let secs = created.rem_euclid(day) as i32;
+        format!("{:02}:{:02}", secs / 3600, (secs % 3600) / 60)
+    } else if days == 1 {
+        tr("Yesterday").to_string()
+    } else {
+        format!("{days}d")
+    }
+}
+
 /// The history popup: Today, Previous 7 days and Older, each chat named by its first message
 /// (pen.dev's list), with Clear Agent History below — a second click confirms it.
 fn history_menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    // Pin the popup's width: `Popup::width` only seeds a default, and the area then shrinks to
+    // its content's min size — a narrow list would clip "Clear Agent History" and elide even the
+    // short "New Agent" title. Fixing the width here keeps every row a predictable size.
+    ui.set_width(280.0);
     let now = now_secs();
     let day = 86_400.0;
     // The days count from the epoch: the popup says "Today" for the same UTC day — close
     // enough without a date library, and every other day sits in a group that fits.
     let today = (now / day).floor();
+    // The three groups must not overlap: each chat lands in exactly one, or the same conversation
+    // lists under every heading at once (a chat from today also reads as "within the last 7 days"
+    // and — with a catch-all — as "older" too). "Today" claims the same UTC day and any unset time;
+    // the rest split what's left on how many days old it is.
     let groups: [HistoryGroup; 3] = [
         (tr("Today"), Box::new(move |at| at <= 0.0 || (at / day).floor() == today)),
-        (tr("Previous 7 days"), Box::new(move |at| now - at < 7.0 * day)),
-        (tr("Older"), Box::new(|_| true)),
+        (tr("Previous 7 days"), Box::new(move |at| at > 0.0 && (at / day).floor() != today && now - at < 7.0 * day)),
+        (tr("Older"), Box::new(move |at| at > 0.0 && (at / day).floor() != today && now - at >= 7.0 * day)),
     ];
     let mut switch: Option<usize> = None;
     ui.add_space(4.0);
@@ -404,9 +453,15 @@ fn history_menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
             if active || resp.hovered() {
                 ui.painter().rect_filled(rect, CornerRadius::same(5), t.hover);
             }
-            let shown = widgets::elide_font(ui, &title, rect.width() - 16.0, regular(11.0));
+            // A short stamp on the right tells chats apart inside a group — several empty chats
+            // all fall back to "New Agent", and only their time separates them.
+            let stamp = ui.painter().layout_no_wrap(hist_stamp(chat.created, now), regular(9.5), t.text_secondary);
+            let (stamp_w, stamp_h) = (stamp.size().x, stamp.size().y);
+            let room = (rect.width() - 16.0 - stamp_w - 8.0).max(20.0);
+            let shown = widgets::elide_font(ui, &title, room, regular(11.0));
             let color = if active { t.accent } else { t.text };
             ui.painter().text(pos2(rect.min.x + 8.0, rect.center().y), Align2::LEFT_CENTER, shown, regular(11.0), color);
+            ui.painter().galley(pos2(rect.max.x - 8.0 - stamp_w, rect.center().y - stamp_h * 0.5), stamp, t.text_secondary);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 switch = Some(i);
             }
@@ -450,8 +505,12 @@ fn transcript(app: &mut FigApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let w = ui.available_width();
     let active = app.ui.agent.active;
-    let input_h =
-        INPUT_H + if app.ui.agent.setup_error.is_some() { ERROR_H } else { 0.0 } + if app.ui.agent.attachments.is_empty() { 0.0 } else { DROPS_H };
+    // What the input block needs below the transcript: its own height, the gap that keeps it
+    // clear of the panel's bottom edge, and any note/drop rows above the field.
+    let input_h = INPUT_H
+        + EDGE_PAD
+        + if app.ui.agent.setup_error.is_some() { ERROR_H } else { 0.0 }
+        + if app.ui.agent.attachments.is_empty() { 0.0 } else { DROPS_H };
     let Some(chat) = app.ui.agent.chats.get_mut(active) else { return };
     if chat.rows.is_empty() {
         empty_state(app, ui);
@@ -509,8 +568,8 @@ fn empty_state(app: &mut FigApp, ui: &mut Ui) {
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.add_space(widgets::PAD);
         ui.set_max_width((ui.available_width() - widgets::PAD).max(80.0));
+        ui.add_space(widgets::PAD);
         ui.add(
             egui::Label::new(
                 RichText::new(tr("Drop a DESIGN.md, a text file or an image into the chat; it goes with your message."))
@@ -544,8 +603,8 @@ fn row_ui(ui: &mut Ui, row: &Row, w: f32, t: &Tokens) {
             for seg in segs {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.add_space(widgets::PAD);
                     ui.set_max_width(w - widgets::PAD * 2.0);
+                    ui.add_space(widgets::PAD);
                     ui.add(egui::Label::new(RichText::new(seg).font(regular(11.5)).color(t.text)).wrap());
                 });
             }
@@ -554,8 +613,8 @@ fn row_ui(ui: &mut Ui, row: &Row, w: f32, t: &Tokens) {
         Row::Error(message) => {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.add_space(widgets::PAD);
                 ui.set_max_width(w - widgets::PAD * 2.0);
+                ui.add_space(widgets::PAD);
                 ui.add(egui::Label::new(RichText::new(message).font(regular(10.5)).color(t.danger)).wrap());
             });
         }
@@ -604,16 +663,16 @@ fn tool_row(ui: &mut Ui, name: &str, args: &str, result: Option<&(bool, String)>
         && !summary.is_empty()
     {
         ui.horizontal(|ui| {
-            ui.add_space(widgets::PAD + 13.0);
             ui.set_max_width((w - widgets::PAD * 2.0 - 13.0).max(80.0));
+            ui.add_space(widgets::PAD + 13.0);
             ui.add(egui::Label::new(RichText::new(summary).font(regular(10.0)).color(t.text_tertiary)).wrap());
         });
     }
 }
 
 /// The input box, as pen.dev's: one rounded container holding the field, and below it —
-/// inside the same border — the controls row: the backend at the left, the model picker and
-/// the round send button at the right.
+/// inside the same border — the controls row: attach, the parallel-agents count and the
+/// refine-rounds count at the left; the model picker and the round send button at the right.
 fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
     let t = Tokens::get(ui.ctx());
     let w = ui.available_width();
@@ -621,8 +680,8 @@ fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
     // Why the last send couldn't start, with a way to fix it.
     if let Some(why) = app.ui.agent.setup_error.clone() {
         ui.horizontal(|ui| {
-            ui.add_space(widgets::PAD);
             ui.set_max_width(w - 90.0);
+            ui.add_space(widgets::PAD);
             ui.add(egui::Label::new(RichText::new(why).font(regular(10.0)).color(t.warning)).wrap());
             if widgets::button(ui, tr("Settings"), false, true).clicked() {
                 app.ui.preferences = true;
@@ -661,8 +720,8 @@ fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
     let sendable = !running && (has_text || has_context);
     let mut send = false;
     ui.horizontal(|ui| {
-        ui.add_space(widgets::PAD);
         ui.set_max_width((ui.available_width() - widgets::PAD).max(120.0));
+        ui.add_space(widgets::PAD);
         egui::Frame::NONE
             .fill(t.field)
             .corner_radius(CornerRadius::same(10))
@@ -693,25 +752,23 @@ fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
                     }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        // Left: which CLI runs the turns; a chevron cycles when this computer
-                        // has more than one (the model picker routes around it anyway). This is
-                        // placed last in the right-to-left row, so it takes a small bounded slice
-                        // of what the model picker leaves, and can never shove that group past the
-                        // field's edge.
-                        if !app.ui.agent.backends.is_empty() {
-                            let name = app.ui.agent.selected_name();
-                            // Never more than the row actually has: a floor here would over-allocate
-                            // and push the model picker and send button past the field's right edge.
-                            let room = ui.available_width().min(104.0);
-                            let shown = widgets::elide_font(ui, &name, room, semibold(10.5));
-                            ui.label(RichText::new(shown).font(semibold(10.5)).color(t.text_secondary));
-                            let n = app.ui.agent.backends.len();
-                            if n > 1 {
-                                let next = app.ui.agent.backends[(app.ui.agent.backend + 1) % n].kind.name().to_string();
-                                if widgets::icon_button(ui, crate::icons::Icon::Chevron, &trf("Switch to {name}", &[("name", &next)])) {
-                                    app.ui.agent.backend = (app.ui.agent.backend + 1) % n;
-                                }
-                            }
+                        // Left: attach a file, then the shape of the send — how many agents
+                        // work in parallel (each in its own chat, the model picker chooses
+                        // what they run) and how many refine rounds each one makes.
+                        attach_button(app, ui, &t);
+                        let n = app.session.prefs.agent_runs.0.clamp(1, MAX_RUNS);
+                        let count = format!("×{n}");
+                        let hover = trf("{n} agents work in parallel, each in its own chat", &[("n", &n.to_string())]);
+                        if count_pill(ui, &t, crate::icons::Icon::Agents, &count, &hover) {
+                            app.session.prefs.agent_runs.0 = if n >= MAX_RUNS { 1 } else { n + 1 };
+                            app.services.save_prefs(&app.session.prefs);
+                        }
+                        let m = app.session.prefs.agent_runs.1.clamp(1, MAX_RUNS);
+                        let count = format!("×{m}");
+                        let hover = trf("{n} refine rounds per agent", &[("n", &m.to_string())]);
+                        if count_pill(ui, &t, crate::icons::Icon::Iterate, &count, &hover) {
+                            app.session.prefs.agent_runs.1 = if m >= MAX_RUNS { 1 } else { m + 1 };
+                            app.services.save_prefs(&app.session.prefs);
                         }
                         // Right: the model picker, then the round send button (Stop while it works).
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
@@ -755,6 +812,36 @@ fn send_stop(ui: &mut Ui, running: bool, sendable: bool, t: &Tokens) -> bool {
     resp.clicked() && sendable
 }
 
+/// The attach button at the field's left: a paperclip opening the system picker — the picked
+/// file joins the dropped ones, with the same caps and the same two kinds.
+fn attach_button(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(5), t.hover);
+    }
+    crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(14.0, 14.0)), crate::icons::Icon::Plus, t.icon_secondary);
+    let what = tr("Attach a file");
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(what);
+    crate::a11y::button(&resp, what);
+    if resp.clicked() {
+        app.pick_open(tr("Attach context file"), ATTACH_EXTENSIONS, |app, path| take_file(app, &path));
+    }
+}
+
+/// A count pill in the controls row: its icon and "×N", stepping the count when clicked
+/// (1 → 2 → … → back to 1). The hover says what the count does.
+fn count_pill(ui: &mut Ui, t: &Tokens, icon: crate::icons::Icon, count: &str, hover: &str) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(46.0, 20.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(5), t.hover);
+    }
+    crate::icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.min.x + 12.0, rect.center().y), vec2(13.0, 13.0)), icon, t.text_secondary);
+    ui.painter().text(pos2(rect.min.x + 21.0, rect.center().y), Align2::LEFT_CENTER, count, semibold(10.5), t.text);
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hover);
+    crate::a11y::button(&resp, hover);
+    resp.clicked()
+}
+
 /// Take files dropped onto the panel: an image's bytes travel with the next send, and a
 /// text file's text becomes part of the message (the empty state's note says so).
 fn dropped(app: &mut FigApp, ctx: &egui::Context) {
@@ -770,25 +857,49 @@ fn dropped(app: &mut FigApp, ctx: &egui::Context) {
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "context.txt".to_string());
         // A file on disk is read by path; a drop with no file behind it carries its bytes.
         let bytes = if path.exists() { std::fs::read(&path).ok() } else { crate::dropped_bytes(&file) };
-        let Some(bytes) = bytes else { continue };
-        // A real image the APIs can see (sniffed, not named): its bytes ride along —
-        // up to the API's own cap; over it, the drop is skipped as any binary is.
-        if let Some(mime) = image_media_type(&bytes) {
-            if bytes.len() <= MAX_IMAGE_BYTES {
-                app.ui.agent.attachments.push(Pending::Image { name, mime, data: bytes });
-            }
-            continue;
+        if let Some(bytes) = bytes {
+            add_pending(app, name, bytes);
         }
-        let content: String = String::from_utf8_lossy(&bytes).chars().take(MAX_DROP_CHARS).collect();
-        // Mostly replacement characters: a binary — not this send's context.
-        if content.matches('\u{fffd}').count() * 40 > content.len() {
-            continue;
-        }
-        if content.trim().is_empty() {
-            continue;
-        }
-        app.ui.agent.attachments.push(Pending::Text { name, content });
     }
+}
+
+/// One file chosen with the attach button: read it by path, and let it in as a drop would.
+pub(crate) fn take_file(app: &mut FigApp, path: &std::path::Path) {
+    if app.ui.agent.attachments.len() >= MAX_DROPS {
+        return;
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "context.txt".to_string());
+    let Ok(bytes) = std::fs::read(path) else {
+        app.toast(tr("Couldn't read that file."));
+        return;
+    };
+    add_pending(app, name, bytes);
+}
+
+/// What a file's bytes become waiting for the next send: a real image's bytes ride along
+/// with the turn (up to the API's own cap), a text file's text joins the message, and a
+/// binary — mostly replacement characters — is not this send's context.
+pub(crate) fn add_pending(app: &mut FigApp, name: String, bytes: Vec<u8>) {
+    if app.ui.agent.attachments.len() >= MAX_DROPS {
+        return;
+    }
+    // A real image the APIs can see (sniffed, not named): its bytes ride along —
+    // up to the API's own cap; over it, the file is skipped as any binary is.
+    if let Some(mime) = image_media_type(&bytes) {
+        if bytes.len() <= MAX_IMAGE_BYTES {
+            app.ui.agent.attachments.push(Pending::Image { name, mime, data: bytes });
+        }
+        return;
+    }
+    let content: String = String::from_utf8_lossy(&bytes).chars().take(MAX_DROP_CHARS).collect();
+    // Mostly replacement characters: a binary — not this send's context.
+    if content.matches('\u{fffd}').count() * 40 > content.len() {
+        return;
+    }
+    if content.trim().is_empty() {
+        return;
+    }
+    app.ui.agent.attachments.push(Pending::Text { name, content });
 }
 
 /// Which model the next turn runs (pen.dev's picker, one list for every provider): its name
@@ -883,7 +994,9 @@ fn model_row(ui: &mut Ui, t: &Tokens, choice: &ModelChoice, picked: bool) -> boo
 }
 
 /// Ask the active conversation's worker for a turn (starting its thread the first time),
-/// routing the picked model to a backend that runs it.
+/// routing the picked model to a backend that runs it. The composer's agents count decides
+/// how many variants run: the active chat takes the first, and every other one is a fresh
+/// chat beside it, all working the same prompt in parallel under the same model.
 fn send_turn(app: &mut FigApp, ctx: &egui::Context) {
     let original = app.ui.agent.draft.trim().to_string();
     let has_context = !app.ui.agent.attachments.is_empty();
@@ -939,35 +1052,95 @@ fn send_turn(app: &mut FigApp, ctx: &egui::Context) {
             }
         }
     }
-    let Some(chat) = app.ui.agent.chats.get_mut(active) else { return };
+    // One agent, or several in parallel: each with its own chat, its own worker and its own
+    // refine rounds, all on the same prompt and the same model.
+    let count = app.session.prefs.agent_runs.0.clamp(1, MAX_RUNS) as usize;
+    let rounds = app.session.prefs.agent_runs.1.clamp(1, MAX_RUNS);
+    let mut started = 0;
+    for i in 0..count {
+        let idx = if i == 0 {
+            active
+        } else {
+            app.ui.agent.chats.push(Chat::new());
+            app.ui.agent.chats.len() - 1
+        };
+        let v =
+            Variant { idx, variant: if count > 1 { i + 1 } else { 0 }, rounds, kind, model: model.clone(), bin: bin.clone(), exe: exe.clone(), port };
+        if !start_variant(app, ctx, &v, &keys, &text, &shown, &images, &original) {
+            break;
+        }
+        started += 1;
+    }
+    // The drops belong to this turn now — and everything that could still refuse has run,
+    // so a send that never started keeps them for the retry.
+    if started > 0 {
+        app.ui.agent.attachments.clear();
+    }
+    persist(app);
+}
+
+/// One variant of a send: which chat it lands in, and what it runs on.
+struct Variant {
+    idx: usize,
+    variant: usize,
+    rounds: u32,
+    kind: BackendKind,
+    model: Option<String>,
+    bin: Option<PathBuf>,
+    exe: PathBuf,
+    port: u16,
+}
+
+/// One chat's half of a send: its worker (built and started the first time), the prompt on
+/// its transcript, and the refine rounds it will run by itself once a turn completes. False
+/// when this variant couldn't start — the reason is on its transcript and above the field.
+fn start_variant(
+    app: &mut FigApp,
+    ctx: &egui::Context,
+    v: &Variant,
+    keys: &ApiKeys,
+    text: &str,
+    shown: &str,
+    images: &[Attachment],
+    original: &str,
+) -> bool {
     // A chat restored from the history continues its CLI session — under the backend that
     // owns that session id, or a fresh one after a backend switch.
-    let resume = if chat.link.is_none() { chat.id.clone().filter(|_| chat.kind == Some(kind)) } else { None };
-    if chat.link.is_none() {
+    let resume = match app.ui.agent.chats.get(v.idx) {
+        Some(chat) if chat.link.is_none() => chat.id.clone().filter(|_| chat.kind == Some(v.kind)),
+        _ => None,
+    };
+    let mut built = None;
+    if app.ui.agent.chats.get(v.idx).is_some_and(|c| c.link.is_none()) {
+        match build_backend(v.kind, v.bin.clone(), v.exe.clone(), v.port, v.model.clone(), keys) {
+            Ok(b) => built = Some(b),
+            Err(why) => {
+                refuse(app, v.idx, why, original);
+                return false;
+            }
+        }
+    }
+    let Some(chat) = app.ui.agent.chats.get_mut(v.idx) else { return false };
+    if let Some(built) = built {
         let (tx_cmd, rx_cmd) = mpsc::channel();
         let (tx_ev, rx_ev) = mpsc::channel();
-        let built = match build_backend(kind, bin, exe, port, model, &keys) {
-            Ok(built) => built,
-            Err(why) => return refuse(app, active, why, &original),
-        };
         // The worker outlives this call: it needs its own clone of the context.
         let ctx = ctx.clone();
         std::thread::spawn(move || worker(built, resume, rx_cmd, tx_ev, ctx));
         chat.link = Some(Link { cmd: tx_cmd, events: rx_ev });
     }
-    // The drops belong to this turn now — and everything that could still refuse has run,
-    // so a send that never started keeps them for the retry.
-    app.ui.agent.attachments.clear();
-    chat.kind = Some(kind);
+    chat.kind = Some(v.kind);
+    chat.variant = v.variant;
+    chat.rounds_left = v.rounds.saturating_sub(1);
     if chat.created <= 0.0 {
         chat.created = now_secs();
     }
-    chat.rows.push(Row::User(shown));
+    chat.rows.push(Row::User(shown.to_string()));
     chat.running = true;
     if let Some(link) = &chat.link {
-        let _ = link.cmd.send(Cmd::Turn(Turn { text, attachments: images }));
+        let _ = link.cmd.send(Cmd::Turn(Turn { text: text.to_string(), attachments: images.to_vec() }));
     }
-    persist(app);
+    true
 }
 
 /// Why the last send couldn't start, said above the input and in the transcript — with the
@@ -1126,25 +1299,60 @@ fn worker(backend: Box<dyn Backend>, resume: Option<String>, cmd: Receiver<Cmd>,
 /// current whenever a transcript changes.
 pub(crate) fn poll(app: &mut FigApp, ctx: &egui::Context) {
     let mut changed = false;
-    let mut busy = false;
-    for chat in &mut app.ui.agent.chats {
+    let mut refine: Vec<usize> = Vec::new();
+    for (i, chat) in app.ui.agent.chats.iter_mut().enumerate() {
         // Drain the channels first: the events must leave `link` before they land on `chat`.
         let events: Vec<AgentEvent> = match &chat.link {
             Some(link) => link.events.try_iter().collect(),
             None => Vec::new(),
         };
+        // A turn that ended well is the moment for this chat's next refine round (if any);
+        // a cancelled or failed one ends the rounds here.
+        let finished = events.iter().any(|e| matches!(e, AgentEvent::Done { reason } if matches!(reason.as_str(), "success" | "end_turn")));
         for event in events {
             apply(chat, event);
             changed = true;
         }
-        busy |= chat.running;
+        if finished && !chat.running && chat.rounds_left > 0 {
+            refine.push(i);
+        }
     }
+    for i in refine {
+        changed |= refine_once(app, ctx, i);
+    }
+    let busy = app.ui.agent.chats.iter().any(|c| c.running);
     if changed || busy {
         app.ui.agents.note_panel_activity(ctx.input(|i| i.time));
     }
     if changed {
         persist(app);
     }
+}
+
+/// One chat's next refine round: the prompt the composer's rounds count promised, asked of
+/// the same worker. Only a chat with a live worker and rounds left goes again — a chat come
+/// back from the history has no worker to ask, and its rounds end here.
+pub(crate) fn refine_once(app: &mut FigApp, ctx: &egui::Context, idx: usize) -> bool {
+    let text = tr("Review the canvas and your last changes, then refine the design: fix rough edges and improve hierarchy, spacing and consistency.")
+        .to_string();
+    let Some(chat) = app.ui.agent.chats.get_mut(idx) else { return false };
+    if chat.running || chat.rounds_left == 0 {
+        return false;
+    }
+    let Some(link) = &chat.link else {
+        chat.rounds_left = 0;
+        return false;
+    };
+    chat.rounds_left -= 1;
+    chat.rows.push(Row::User(text.clone()));
+    chat.running = true;
+    let sent = link.cmd.send(Cmd::Turn(Turn { text, attachments: Vec::new() })).is_ok();
+    if sent {
+        ctx.request_repaint();
+    } else {
+        chat.running = false;
+    }
+    sent
 }
 
 /// One event's effect on the transcript (pure; this is what the tests cover).

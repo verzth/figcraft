@@ -139,6 +139,8 @@ name = "English"
 "Ask me to design anything" = "Ask me to design anything"
 "Asking the server…" = "Asking the server…"
 "Assets" = "Assets"
+"Attach a file" = "Attach a file"
+"Attach context file" = "Attach context file"
 "Attach context files." = "Attach context files."
 "Aug" = "Aug"
 "Auto" = "Auto"
@@ -341,6 +343,7 @@ name = "English"
 "Couldn't download the variables" = "Couldn't download the variables"
 "Couldn't install FigCraft in {client}: {error}" = "Couldn't install FigCraft in {client}: {error}"
 "Couldn't reach {server}: showing what this computer remembers." = "Couldn't reach {server}: showing what this computer remembers."
+"Couldn't read that file." = "Couldn't read that file."
 "Couldn't remove FigCraft from {client}: {error}" = "Couldn't remove FigCraft from {client}: {error}"
 "Couldn't save automatically: {error}" = "Couldn't save automatically: {error}"
 "Couldn't switch to port {port}" = "Couldn't switch to port {port}"
@@ -1186,6 +1189,7 @@ name = "English"
 "Reverse the order" = "Reverse the order"
 "Reversed triangle" = "Reversed triangle"
 "Review and merge" = "Review and merge"
+"Review the canvas and your last changes, then refine the design: fix rough edges and improve hierarchy, spacing and consistency." = "Review the canvas and your last changes, then refine the design: fix rough edges and improve hierarchy, spacing and consistency."
 "Ribbon" = "Ribbon"
 "Right" = "Right"
 "Right side" = "Right side"
@@ -1394,7 +1398,6 @@ name = "English"
 "Swapped {n} assets" = { one = "Swapped {n} asset", other = "Swapped {n} assets" }
 "Swapped {n} assets; {missed} had no match and still use the old library" = { one = "Swapped {n} asset; {missed} had no match and still use the old library", other = "Swapped {n} assets; {missed} had no match and still use the old library" }
 "Sweep" = "Sweep"
-"Switch to {name}" = "Switch to {name}"
 "System" = "System"
 "Tab / Shift+Tab" = "Tab / Shift+Tab"
 "Table" = "Table"
@@ -1723,6 +1726,7 @@ name = "English"
 "{name}, online, open only to you" = "{name}, online, open only to you"
 "{name}, {kind}, {w} by {h}, selected" = "{name}, {kind}, {w} by {h}, selected"
 "{n} added" = { one = "{n} added", other = "{n} added" }
+"{n} agents work in parallel, each in its own chat" = "{n} agents work in parallel, each in its own chat"
 "{n} autosave versions" = { one = "{n} autosave version", other = "{n} autosave versions" }
 "{n} changed" = { one = "{n} changed", other = "{n} changed" }
 "{n} columns" = { one = "{n} column", other = "{n} columns" }
@@ -1748,6 +1752,7 @@ name = "English"
 "{n} people joined" = { one = "{n} person joined", other = "{n} people joined" }
 "{n} preferred components" = { one = "{n} preferred component", other = "{n} preferred components" }
 "{n} ready" = { one = "{n} ready", other = "{n} ready" }
+"{n} refine rounds per agent" = "{n} refine rounds per agent"
 "{n} removed" = { one = "{n} removed", other = "{n} removed" }
 "{n} replies" = { one = "{n} reply", other = "{n} replies" }
 "{n} rows" = { one = "{n} row", other = "{n} rows" }
