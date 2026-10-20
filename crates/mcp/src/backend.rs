@@ -77,8 +77,13 @@ pub fn page_children<B: Backend + ?Sized>(b: &mut B) -> Result<Vec<u64>, String>
 }
 
 fn temp_png(what: &str) -> String {
+    // The clock's nanoseconds repeat: on macOS the stamp only moves about every 20
+    // microseconds, so two calls in the same tick would ask for the same file. The counter
+    // keeps them apart.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    std::env::temp_dir().join(format!("figcraft-mcp-{what}-{}-{n}.png", std::process::id())).to_string_lossy().into_owned()
+    let k = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("figcraft-mcp-{what}-{}-{n}-{k}.png", std::process::id())).to_string_lossy().into_owned()
 }
 
 fn read_and_remove(path: &str) -> Result<Vec<u8>, String> {

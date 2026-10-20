@@ -18,8 +18,13 @@ fn nested(depth: usize) -> (Session, NodeId) {
 #[test]
 fn export_depth_errors_reach_commands_and_preserve_existing_files() {
     let (mut s, root) = nested(257);
+    // The clock's nanoseconds repeat: on macOS the stamp only moves about every 20
+    // microseconds, so two tests starting in the same tick ask for the same directory and
+    // the second one fails on "File exists". The counter keeps them apart.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("figcraft-export-depth-{}-{stamp}", std::process::id()));
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("figcraft-export-depth-{}-{stamp}-{n}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     for format in [ExportFormat::Svg, ExportFormat::Pdf] {
         let path = dir.join(format!("deep.{}", format.ext()));

@@ -421,8 +421,13 @@ mod tests {
             parent = doc.create(parent, figcraft_doc::NodeKind::Group, "group", 0.0, 0.0, 32.0, 32.0).unwrap();
         }
         doc.create(parent, figcraft_doc::NodeKind::Rectangle, "leaf", 0.0, 0.0, 8.0, 8.0).unwrap();
+        // The clock's nanoseconds repeat: on macOS the stamp only moves about every 20
+        // microseconds, so two tests starting in the same tick ask for the same directory and
+        // the second one fails on "File exists". The counter keeps them apart.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("figcraft-cli-export-depth-{}-{stamp}", std::process::id()));
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("figcraft-cli-export-depth-{}-{stamp}-{n}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         for ext in ["svg", "pdf"] {
             let path = dir.join(format!("previous.{ext}"));
@@ -439,8 +444,13 @@ mod tests {
     }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
+        // The clock's nanoseconds repeat: on macOS the stamp only moves about every 20
+        // microseconds, so two tests starting in the same tick ask for the same directory and
+        // the second one fails on "File exists". The counter keeps them apart.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("figcraft-cli-{tag}-{}-{stamp}", std::process::id()));
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("figcraft-cli-{tag}-{}-{stamp}-{n}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         dir
     }

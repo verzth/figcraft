@@ -16,8 +16,13 @@ fn export_depth_cli_refuses_partial_files_and_accepts_an_inner_root() {
     }
     let leaf = doc.create(parent, NodeKind::Rectangle, "leaf", 3.0, 5.0, 13.0, 17.0).unwrap();
     doc.get_mut(leaf).unwrap().fills = vec![Paint::solid(Color::from_hex("FF0000").unwrap())];
+    // The clock's nanoseconds repeat: on macOS the stamp only moves about every 20
+    // microseconds, so two tests starting in the same tick ask for the same directory and
+    // the second one fails on "File exists". The counter keeps them apart.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("figcraft-cli-depth-process-{}-{stamp}", std::process::id()));
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("figcraft-cli-depth-process-{}-{stamp}-{n}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     let input = dir.join("deep.figcraft");
     std::fs::write(&input, figcraft_format::save_bytes(&doc, None).unwrap()).unwrap();
