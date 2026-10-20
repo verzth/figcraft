@@ -159,6 +159,11 @@ mod spawn {
                 while !stop_t.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // The listener is nonblocking so the loop can notice `stop`; the
+                            // accepted socket inherits that flag on macOS, and a read that
+                            // beats the request's bytes would then give up on the whole
+                            // request — the client answers "Peer disconnected".
+                            let _ = stream.set_nonblocking(false);
                             let Some((head, body)) = read_request(&mut stream) else { continue };
                             seen_t.lock().unwrap().push((head, body));
                             let (delay, response) = {
