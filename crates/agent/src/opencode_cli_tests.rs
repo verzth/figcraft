@@ -1,6 +1,9 @@
 //! The OpenCode JSONL parser's mapping and the spawn wiring, against a fake `opencode` that
 //! speaks the same JSON on stdout (the real CLI is exercised by hand from the panel).
 
+use std::path::PathBuf;
+
+use crate::claude_cli::SERVER_NAME;
 use crate::opencode_cli::{OpenCodeCli, Parser};
 use crate::{AgentEvent, Session, Turn};
 
@@ -112,6 +115,21 @@ fn long_tool_output_is_cut_to_one_line_and_junk_is_tolerated() {
 
     // Not JSON, an unknown part, an unknown session line: all ignored, nothing panics.
     assert!(events(&mut p, &["not json", r#"{"type":"step_start","part":{"type":"step-start"}}"#, r#"{"type":"wat"}"#]).is_empty());
+}
+
+/// OpenCode resolves the session's directory from `PWD`, not from the process cwd. A value
+/// inherited from whatever launched the app (a shell sitting in some other project) sent the
+/// private server — and so the turn and its `opencode.json` — to that other directory, which
+/// never names `figcraft-app`; the agent then fell back to a headless server and the
+/// attached canvas stayed untouched. Regression: `PWD` must name the temp dir the config was
+/// written to, whichever directory the app happens to run from.
+#[test]
+fn the_child_is_pointed_at_the_temp_config_dir_by_pwd_as_well_as_by_cwd() {
+    let cli = OpenCodeCli::new("/usr/bin/opencode", "/usr/local/bin/figcraft-cli", 7979);
+    let cmd = cli.command("halo");
+    let cwd = cmd.get_current_dir().expect("a working directory").to_path_buf();
+    let pwd = cmd.get_envs().find(|(name, _)| *name == "PWD").expect("PWD is set").1.expect("PWD has a value").to_os_string();
+    assert_eq!(PathBuf::from(pwd), cwd, "the session's directory must be the one holding opencode.json");
 }
 
 #[cfg(unix)]
@@ -233,13 +251,17 @@ mod spawn {
         let got = collect_until_done(&session);
         println!("{got:#?}");
         assert!(got.iter().any(|e| matches!(e, AgentEvent::Done { .. })), "{got:?}");
-        let tools: Vec<&str> = got
+        // The turn must reach the canvas it is attached to. A `figcraft-app.*` call is the
+        // only evidence: any tool at all is not, because OpenCode can silently miss the
+        // per-session config and let the agent fall back to a headless `figcraft-cli mcp`,
+        // which would leave the attached document untouched while this test still passed.
+        let attached: Vec<&str> = got
             .iter()
             .filter_map(|e| match e {
-                AgentEvent::ToolStart { name, .. } => Some(name.as_str()),
+                AgentEvent::ToolStart { name, .. } if name.starts_with(&format!("{SERVER_NAME}.")) => Some(name.as_str()),
                 _ => None,
             })
             .collect();
-        assert!(!tools.is_empty(), "no MCP tool was called: {got:?}");
+        assert!(!attached.is_empty(), "no {SERVER_NAME} tool was called on the attached canvas: {got:?}");
     }
 }

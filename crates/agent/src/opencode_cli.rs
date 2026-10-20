@@ -3,8 +3,10 @@
 //! The CLI learns about the running app from an `opencode.json` written into a per-instance
 //! temp dir used as the child's cwd (`mcp.figcraft-app` → `figcraft-cli mcp --attach PORT`);
 //! project config merges with the user's own settings and auth, which live elsewhere and are
-//! never touched. Output is JSONL of message parts, mapped to [`AgentEvent`]s. OpenCode says
-//! nothing when a turn ends well — the pump turns a clean exit into `Done`.
+//! never touched. The child also gets `PWD` pointed at that dir, because OpenCode resolves
+//! the session's directory from `PWD` rather than the process cwd. Output is JSONL of message
+//! parts, mapped to [`AgentEvent`]s. OpenCode says nothing when a turn ends well — the pump
+//! turns a clean exit into `Done`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -92,9 +94,17 @@ impl OpenCodeCli {
         Ok(())
     }
 
-    fn command(&self, prompt: &str) -> Command {
+    /// The `opencode` invocation for one turn, with the cwd and env that decide which
+    /// directory the session — and so our `opencode.json` — belongs to. Package-private so
+    /// the tests can read the command back.
+    pub(crate) fn command(&self, prompt: &str) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("run").arg("--standalone").arg("--format").arg("json").arg("--auto").current_dir(&self.work_dir);
+        // OpenCode resolves the session's directory from `PWD`, not from the process cwd:
+        // a value inherited from whatever launched the app sends the private server — and
+        // so the whole turn — to that other directory, whose `opencode.json` never names
+        // `figcraft-app`. Setting it keeps the session on the temp dir that holds ours.
+        cmd.env("PWD", &self.work_dir);
         if let Some(model) = &self.model {
             cmd.arg("--model").arg(model);
         }
