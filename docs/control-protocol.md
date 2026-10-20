@@ -37,12 +37,13 @@ requests still queued after the UI timeout are discarded, including requests def
 window. A command already running is not interrupted.
 
 A minimised or covered window (the main one or another, see Windows below) draws no frames, but
-still answers `engine.execute`, `engine.commands`, `document.inspect`, `node.get`, `window.list`
-and `ui.render`, acting on the file that window shows, so an attached agent can edit, inspect and
-save while the app is out of sight. Screenshots, input (`ui.input`,
-`ui.pointer`, `ui.key`, `ui.type`) and the interface's own state wait for the window to show, and
-time out after 60 s if it doesn't. (`ui.pointer` and `ui.input` positions still move the agent
-cursor while it waits, so it's where the agent last pointed when the window shows again.)
+still answers `engine.execute`, `engine.commands`, `document.inspect`, `node.get`, `window.list`,
+`ui.render` and `app.hello`, acting on the file that window shows, so an attached agent can edit,
+inspect and save while the app is out of sight. (`app.hello` only records which MCP client is
+connected, so an MCP client's handshake never waits for a window to show.) Screenshots, input
+(`ui.input`, `ui.pointer`, `ui.key`, `ui.type`) and the interface's own state wait for the window
+to show, and time out after 60 s if it doesn't. (`ui.pointer` and `ui.input` positions still move
+the agent cursor while it waits, so it's where the agent last pointed when the window shows again.)
 
 Coordinates are page units, y down. `x`/`y` in `node.set`/`node.create` are relative to the parent
 frame (groups have no coordinate space of their own).

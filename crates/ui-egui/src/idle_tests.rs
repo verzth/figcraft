@@ -365,6 +365,31 @@ fn a_hidden_window_answers_requests_that_need_no_frame() {
 }
 
 #[test]
+fn a_hidden_window_answers_an_mcp_client_that_says_hello() {
+    // An MCP client says hello while it handshakes. The answer is bookkeeping only (who is
+    // connected), so it must not wait for a frame: a hidden window answers it right away, or the
+    // client's handshake hangs until it gives up and the agent never gets the app's tools.
+    let (mut h, _) = document();
+    h.settle();
+    let (tx, rx) = std::sync::mpsc::channel();
+    h.app.control_queue.push(ControlRequest {
+        id: json!(1),
+        method: "app.hello".into(),
+        params: json!({"client": "figcraft-mcp", "version": "0.6.0"}),
+        reply: tx,
+        cancelled: Default::default(),
+    });
+    let mut hidden = RawInput::default();
+    hidden.viewports.insert(ViewportId::ROOT, egui::ViewportInfo { minimized: Some(true), ..Default::default() });
+    let app = &mut h.app;
+    let _ = h.ctx.run_logic(&hidden, |ctx| crate::control::drain_hidden(app, ctx));
+    let reply = rx.try_recv().expect("the hello is answered while the window is hidden");
+    assert_eq!(reply.id, json!(1));
+    assert_eq!(reply.result.unwrap()["app"], json!("FigCraft"));
+    assert_eq!(h.app.ui.agents.client.as_ref().map(|(c, _)| c.as_str()), Some("figcraft-mcp"));
+}
+
+#[test]
 fn auto_save_writes_a_changed_file_then_rests() {
     let dir = std::env::temp_dir().join(format!("figcraft-auto-save-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

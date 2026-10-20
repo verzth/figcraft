@@ -104,12 +104,22 @@ pub struct Attached {
     addr: String,
     conn: Option<(BufReader<TcpStream>, TcpStream)>,
     next_id: u64,
+    /// How long the handshake's hello may take.
+    hello_timeout: Duration,
 }
+
+/// How long the app may take to answer a call. The app's own timeout is 60 s; leave headroom.
+const READ_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How long the handshake's `app.hello` may take: the client gives up long before the app's own
+/// timeout, so a wedged app must not hold the handshake for 60 s. The app answers it at once (it
+/// needs no frame), so a couple of seconds is generous.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Attached {
     /// Connect to `addr` (e.g. `127.0.0.1:7979`), failing fast when nothing is listening.
     pub fn connect(addr: &str) -> std::io::Result<Self> {
-        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1 };
+        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1, hello_timeout: HELLO_TIMEOUT };
         r.reconnect()?;
         Ok(r)
     }
@@ -117,6 +127,12 @@ impl Attached {
     /// Connect to `127.0.0.1:port`.
     pub fn port(port: u16) -> std::io::Result<Self> {
         Self::connect(&format!("127.0.0.1:{port}"))
+    }
+
+    /// Give the handshake's hello `timeout` to be answered.
+    pub fn with_hello_timeout(mut self, timeout: Duration) -> Self {
+        self.hello_timeout = timeout;
+        self
     }
 
     pub fn addr(&self) -> &str {
@@ -130,8 +146,7 @@ impl Attached {
             match TcpStream::connect_timeout(&sa, Duration::from_millis(800)) {
                 Ok(s) => {
                     s.set_nodelay(true).ok();
-                    // The app answers within 60 s (its own timeout); leave headroom.
-                    s.set_read_timeout(Some(Duration::from_secs(90))).ok();
+                    s.set_read_timeout(Some(READ_TIMEOUT)).ok();
                     let read = s.try_clone()?;
                     self.conn = Some((BufReader::new(read), s));
                     return Ok(());
@@ -156,14 +171,27 @@ impl Attached {
     }
 
     fn roundtrip(&mut self, line: &str) -> std::io::Result<String> {
+        self.roundtrip_with(line, None)
+    }
+
+    /// Send `line` and read the reply. With `timeout`, the read gives up after it: the read
+    /// timeout lives on the socket, so it covers the reader too.
+    fn roundtrip_with(&mut self, line: &str, timeout: Option<Duration>) -> std::io::Result<String> {
         let Some((reader, writer)) = self.conn.as_mut() else {
             return Err(std::io::Error::new(std::io::ErrorKind::NotConnected, "not connected to the app"));
         };
         writer.write_all(line.as_bytes())?;
         writer.write_all(b"\n")?;
         writer.flush()?;
+        if let Some(t) = timeout {
+            reader.get_ref().set_read_timeout(Some(t)).ok();
+        }
         let mut reply = String::new();
-        if reader.read_line(&mut reply)? == 0 {
+        let read = reader.read_line(&mut reply);
+        if timeout.is_some() {
+            reader.get_ref().set_read_timeout(Some(READ_TIMEOUT)).ok();
+        }
+        if read? == 0 {
             return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "control channel closed"));
         }
         Ok(reply)
@@ -205,6 +233,32 @@ impl Backend for Attached {
     }
 
     fn hello(&mut self, client: &str, version: &str) {
-        let _ = self.call("app.hello", json!({"client": client, "version": version}));
+        // The handshake's hello must not hang the client: the app answers it at once (it needs no
+        // frame), so a short deadline is enough. A late reply would desync the stream, so the
+        // connection is dropped instead of waiting for it.
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = json!({"id": id, "method": "app.hello", "params": {"client": client, "version": version}}).to_string();
+        if (self.conn.is_none() || self.stale())
+            && let Err(e) = self.reconnect()
+        {
+            log::debug!("the app is not reachable for the hello: {e}");
+            return;
+        }
+        match self.roundtrip_with(&line, Some(self.hello_timeout)) {
+            Ok(reply) => {
+                if let Ok(v) = serde_json::from_str::<Value>(reply.trim())
+                    && v.get("ok").and_then(Value::as_bool) != Some(true)
+                {
+                    log::debug!("the app did not accept the hello: {reply}");
+                }
+            }
+            Err(e) => {
+                // Drop the connection: a reply that arrives later would be read as the answer to
+                // the next request.
+                self.conn = None;
+                log::debug!("the app did not answer the hello in time: {e}");
+            }
+        }
     }
 }

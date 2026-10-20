@@ -147,3 +147,37 @@ fn reconnect_failure_reports_request_not_sent() {
     let error = backend.call("document.inspect", json!({})).unwrap_err();
     assert!(error.contains("request was not sent"), "{error}");
 }
+
+/// A fake app that never answers the hello: the handshake must not hang on it, and the next call
+/// must go out on a fresh connection (a late reply would desync the stream).
+#[test]
+fn a_hello_the_app_never_answers_does_not_hang_the_handshake() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = std::thread::spawn(move || {
+        // First connection: read the hello, never answer it.
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.contains("app.hello"), "{line}");
+        // Second connection: answer what comes.
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        let reply = json!({"id": request["id"], "ok": true, "result": {"pages": []}});
+        writeln!(stream, "{reply}").unwrap();
+    });
+    let mut backend = Attached::port(port).unwrap().with_hello_timeout(std::time::Duration::from_millis(300));
+    let start = std::time::Instant::now();
+    backend.hello("figcraft-mcp", "0.6.0");
+    assert!(start.elapsed() < std::time::Duration::from_secs(10), "the handshake waited for the app's own timeout");
+    // The wedged connection is dropped: the next call opens a new one.
+    match backend.call("document.inspect", json!({"depth": 1})) {
+        Ok(doc) => assert_eq!(doc["pages"].as_array().unwrap().len(), 0, "{doc}"),
+        Err(e) => assert!(e.contains("not reachable"), "{e}"),
+    }
+    app.join().unwrap();
+}

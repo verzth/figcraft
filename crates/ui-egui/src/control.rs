@@ -169,7 +169,11 @@ pub fn drain(app: &mut FigApp, ctx: &Context) {
 }
 
 /// Methods that need no frame drawn (#269): a hidden window answers them too.
-const NO_FRAME: &[&str] = &["engine.execute", "engine.commands", "document.inspect", "node.get", "window.list", "ui.render"];
+///
+/// `app.hello` is bookkeeping only (it records who is connected, for the tab strip and the
+/// preferences), so it answers while the window is hidden: an MCP client that says hello during
+/// its handshake must not wait for a window that may never show again.
+const NO_FRAME: &[&str] = &["engine.execute", "engine.commands", "document.inspect", "node.get", "window.list", "ui.render", "app.hello"];
 
 /// Whether window `id` draws no frames now: minimised, or covered by other windows (on macOS also
 /// on another Space).
