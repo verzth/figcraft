@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
 
-use crate::pump::{line160, result_text};
+use crate::pump::{cut, line160, result_text};
 use crate::{AgentError, AgentEvent, Backend, Turn};
 
 /// The MCP server entry the agent CLI talks to; matches Preferences ▸ AI agents.
@@ -187,9 +187,10 @@ impl Backend for ClaudeCodeCli {
             prompt.push_str(&format!("\n\n(Attached files: {}.)", names.join(", ")));
         }
         let mut cmd = self.command(&prompt, &mcp_config);
-        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| AgentError::Spawn(format!("{}: {e}", self.bin.display())))?;
         let stdout = child.stdout.take().ok_or_else(|| AgentError::Setup("Claude Code gave no output stream.".into()))?;
+        let stderr = child.stderr.take();
         let tx = self.tx.clone().ok_or_else(|| AgentError::Setup("The session has no event channel.".into()))?;
         *self.child.lock().unwrap_or_else(PoisonError::into_inner) = Some(child);
         self.cancelled.store(false, Ordering::SeqCst);
@@ -199,6 +200,25 @@ impl Backend for ClaudeCodeCli {
         let running = Arc::clone(&self.running);
         let cancelled = Arc::clone(&self.cancelled);
         std::thread::spawn(move || {
+            // The stderr tail rides along for the failure message: a CLI that dies saying
+            // nothing on stdout ("command not found", a refused login) must still explain
+            // itself, or the panel reports an exit status and nothing else.
+            let tail = Arc::new(Mutex::new(String::new()));
+            let drain = stderr.map(|mut pipe| {
+                let tail = Arc::clone(&tail);
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    for line in std::io::BufReader::new(&mut pipe).lines().map_while(Result::ok) {
+                        let mut t = tail.lock().unwrap_or_else(PoisonError::into_inner);
+                        t.push_str(&line);
+                        t.push('\n');
+                        let len = t.len();
+                        if len > 800 {
+                            t.replace_range(..len - 400, "");
+                        }
+                    }
+                })
+            });
             let mut parser = Parser::default();
             let mut finished = false;
             for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)).map_while(Result::ok) {
@@ -219,6 +239,9 @@ impl Backend for ClaudeCodeCli {
             let mut child = child_slot.lock().unwrap_or_else(PoisonError::into_inner).take();
             let status = child.as_mut().and_then(|c| c.wait().ok());
             running.store(false, Ordering::SeqCst);
+            if let Some(handle) = drain {
+                let _ = handle.join();
+            }
             if finished {
                 return;
             }
@@ -226,7 +249,13 @@ impl Backend for ClaudeCodeCli {
                 AgentEvent::Done { reason: "cancelled".into() }
             } else {
                 let how = status.map_or_else(|| "it stopped".into(), |s| format!("{s}"));
-                AgentEvent::Failed(format!("Claude Code exited without finishing ({how})."))
+                let mut message = format!("Claude Code exited without finishing ({how}).");
+                let t = tail.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(last) = t.lines().rev().find(|l| !l.trim().is_empty()) {
+                    message.push(' ');
+                    message.push_str(&cut(last.trim()));
+                }
+                AgentEvent::Failed(message)
             };
             let _ = tx.send(event);
         });
@@ -264,6 +293,11 @@ pub(crate) struct Parser {
     pending: BTreeMap<u64, (String, String, String)>,
     /// `tool_use_id` → tool name, for the tool results that follow.
     tools: BTreeMap<String, String>,
+    /// Whether the message arriving has already handed over its content as deltas. A reply
+    /// the stream never chunked — which is how a failed API call reaches the CLI — carries
+    /// only its complete message, and treating that as a repeat dropped it: the panel then
+    /// answered with nothing at all.
+    streamed: bool,
 }
 
 impl Parser {
@@ -278,15 +312,30 @@ impl Parser {
                 }
             }
             "stream_event" => self.stream_event(&v["event"], &mut out),
-            // With partial messages on, text and tool_use arrive as deltas; the complete
-            // assistant messages repeat them, so they are skipped.
-            "user" => self.tool_results(&v["message"]["content"], &mut out),
+            // With partial messages on, text and tool_use arrive as deltas and the complete
+            // message repeats them, so a repeat is skipped; one the stream never chunked
+            // (nothing streamed for it) is replayed — it is the only copy of what was said.
+            "assistant" => self.whole_message(&v["message"], &mut out),
+            // A tool's results close the message that called them: whatever arrives after
+            // them is a new one, so nothing streamed before can make it look like a repeat.
+            "user" => {
+                self.streamed = false;
+                self.tool_results(&v["message"]["content"], &mut out);
+            }
             "result" => {
                 if let (Some(input), Some(output)) = (num(&v["usage"]["input_tokens"]), num(&v["usage"]["output_tokens"])) {
                     out.push(AgentEvent::Tokens { input, output });
                 }
-                let reason = v["subtype"].as_str().unwrap_or("end_turn").to_string();
-                out.push(AgentEvent::Done { reason });
+                let subtype = v["subtype"].as_str().unwrap_or("end_turn").to_string();
+                // A turn the CLI reports as finished but failed: `success` would close the
+                // chat as if it had gone well, so it is named the failure it is.
+                if v["is_error"] == true && matches!(subtype.as_str(), "success" | "end_turn") {
+                    let text = result_text(&v["result"]);
+                    let why = if text.trim().is_empty() { String::from("Claude Code reported an error.") } else { text };
+                    out.push(AgentEvent::Failed(why));
+                } else {
+                    out.push(AgentEvent::Done { reason: subtype });
+                }
             }
             "error" => {
                 let message = v["error"]["message"].as_str().unwrap_or("Claude Code reported an unknown error.");
@@ -300,7 +349,10 @@ impl Parser {
     fn stream_event(&mut self, event: &Value, out: &mut Vec<AgentEvent>) {
         let kind = event["type"].as_str().unwrap_or_default();
         match kind {
+            // One message begins: whatever streams for it is what its complete copy repeats.
+            "message_start" => self.streamed = false,
             "content_block_delta" => {
+                self.streamed = true;
                 let delta = &event["delta"];
                 match delta["type"].as_str() {
                     // Text streams as its own block; the complete assistant message below
@@ -324,6 +376,7 @@ impl Parser {
                 }
             }
             "content_block_start" => {
+                self.streamed = true;
                 let block = &event["content_block"];
                 if block["type"] == "tool_use"
                     && let (Some(index), Some(id), Some(name)) = (index(event), block["id"].as_str(), block["name"].as_str())
@@ -332,6 +385,7 @@ impl Parser {
                 }
             }
             "content_block_stop" => {
+                self.streamed = true;
                 if let Some(index) = index(event)
                     && let Some((id, name, args)) = self.pending.remove(&index)
                 {
@@ -342,6 +396,40 @@ impl Parser {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A complete assistant message. With partial messages on it repeats what the deltas
+    /// already delivered and is skipped; a message the stream never chunked — an API refusal
+    /// the CLI assembles itself, for one — is the only copy of what was said, so it is
+    /// replayed. Reading every complete message as a repeat is what let a refused turn end
+    /// the chat with nothing at all on the screen.
+    fn whole_message(&mut self, message: &Value, out: &mut Vec<AgentEvent>) {
+        if std::mem::take(&mut self.streamed) {
+            return;
+        }
+        let Some(items) = message["content"].as_array() else { return };
+        for item in items {
+            match item["type"].as_str() {
+                Some("text") => {
+                    if let Some(text) = item["text"].as_str()
+                        && !text.is_empty()
+                    {
+                        out.push(AgentEvent::Text(text.to_string()));
+                    }
+                }
+                Some("tool_use") => {
+                    let (Some(id), Some(name)) = (item["id"].as_str(), item["name"].as_str()) else { continue };
+                    // The arguments the deltas would have assembled, on one line of JSON.
+                    let args = match item.get("input").filter(|v| !v.is_null()) {
+                        Some(input) => serde_json::to_string(input).unwrap_or_else(|_| String::from("{}")),
+                        None => String::from("{}"),
+                    };
+                    self.tools.insert(id.to_string(), name.to_string());
+                    out.push(AgentEvent::ToolStart { name: name.to_string(), args });
+                }
+                _ => {}
+            }
         }
     }
 

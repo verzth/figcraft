@@ -101,6 +101,65 @@ fn errors_and_junk_lines_are_tolerated() {
     );
 }
 
+/// The real shape of a refused turn — captured from `claude` 2.1.300 when the account had
+/// spent its usage limit: the stream never chunks, the CLI assembles the failure into one
+/// complete assistant message, and the `result` that follows still calls the turn finished.
+/// Reading that message as a repeat of deltas that never arrived dropped it, and `success`
+/// closed the chat clean: the panel showed the user's own words and then nothing at all.
+#[test]
+fn a_failure_the_stream_never_chunked_reaches_the_panel() {
+    let mut p = Parser::default();
+    let got = events(
+        &mut p,
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"62016a49","model":"claude-sonnet-4-5"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_9","content":[{"type":"text","text":"API Error: 400 You have reached your specified API usage limits."}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":true,"usage":{"input_tokens":0,"output_tokens":0},"result":"API Error: 400 You have reached your specified API usage limits."}"#,
+        ],
+    );
+    assert_eq!(
+        got,
+        vec![
+            AgentEvent::Session("62016a49".into()),
+            AgentEvent::Text("API Error: 400 You have reached your specified API usage limits.".into()),
+            AgentEvent::Tokens { input: 0, output: 0 },
+            AgentEvent::Failed("API Error: 400 You have reached your specified API usage limits.".into()),
+        ]
+    );
+    // A failed result carrying no text of its own still fails the turn: nothing else in
+    // the line would say so, and `success` would end the chat as if all had gone well.
+    let bare =
+        events(&mut Parser::default(), &[r#"{"type":"result","subtype":"success","is_error":true,"usage":{"input_tokens":0,"output_tokens":0}}"#]);
+    assert_eq!(bare, vec![AgentEvent::Tokens { input: 0, output: 0 }, AgentEvent::Failed("Claude Code reported an error.".into())]);
+    // The flag clear is the ordinary finished turn: the earlier tests' `result` lines.
+    let fine =
+        events(&mut Parser::default(), &[r#"{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":2}}"#]);
+    assert_eq!(fine, vec![AgentEvent::Tokens { input: 1, output: 2 }, AgentEvent::Done { reason: "success".into() }]);
+}
+
+/// The same failure arriving after a tool round: the deltas that streamed for the message
+/// before it must not make it read as a repeat of those, or the panel goes quiet again.
+#[test]
+fn an_error_after_a_tool_round_is_not_mistaken_for_a_repeat() {
+    let got = events(
+        &mut Parser::default(),
+        &[
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"figcraft.build_layout","input":{}}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"built"}]}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"API Error: 429 rate limited."}]}}"#,
+        ],
+    );
+    assert_eq!(
+        got,
+        vec![
+            AgentEvent::ToolStart { name: "figcraft.build_layout".into(), args: "{}".into() },
+            AgentEvent::ToolEnd { name: "figcraft.build_layout".into(), ok: true, summary: "built".into() },
+            AgentEvent::Text("API Error: 429 rate limited.".into()),
+        ]
+    );
+}
+
 #[test]
 fn long_summaries_are_cut_to_one_line() {
     let mut p = Parser::default();
@@ -283,6 +342,29 @@ mod spawn {
         session.cancel();
         let got = collect_until_done(&session);
         assert!(got.contains(&AgentEvent::Done { reason: "cancelled".into() }), "{got:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A CLI that dies without a line on stdout must still say why it did: the panel's only
+    /// other answer is an exit status, which explains nothing ("permission denied", a
+    /// missing binary, a refused login all exit the same way).
+    #[test]
+    fn a_claude_silent_on_stdout_reports_what_it_wrote_to_stderr() {
+        let dir = std::env::temp_dir().join(format!("figcraft-agent-stderr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fake-claude.sh");
+        std::fs::write(&path, "#!/bin/sh\nprintf '%s\\n' 'claude: command not found' >&2\nexit 127\n").unwrap();
+        let mut perm = std::fs::metadata(&path).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&path, perm).unwrap();
+        let mut session = Session::new(Box::new(ClaudeCodeCli::new(&path, "/usr/local/bin/figcraft-cli", 7979)));
+        session.send(&turn("halo")).unwrap();
+        let got = collect_until_done(&session);
+        let failed = got.iter().find_map(|e| match e {
+            AgentEvent::Failed(m) => Some(m.as_str()),
+            _ => None,
+        });
+        assert!(failed.is_some_and(|m| m.contains("exited without finishing") && m.contains("command not found")), "{got:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
