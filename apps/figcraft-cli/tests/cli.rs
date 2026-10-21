@@ -25,6 +25,9 @@ fn bad_arguments_exit_2_without_panicking() {
         &["render", "a", "-o"],
         &["perf", "--shapes", "lots"],
         &["mcp", "--attach", "notaport"],
+        // An attached app confines itself: roots go to `figcraft --control`.
+        &["mcp", "--attach", "7979", "--automation-read-root", "."],
+        &["mcp", "--automation-write-root"],
         &["convert", "a"],
     ] {
         let out = bin().args(args).output().unwrap();
@@ -121,8 +124,146 @@ fn mcp_over_stdio() {
 }
 
 #[test]
+fn mcp_over_stdio_confined_to_automation_roots() {
+    let d = tmp("roots");
+    for sub in ["in", "out", "outside"] {
+        std::fs::create_dir_all(d.join(sub)).unwrap();
+    }
+    let p = |rel: &str| d.join(rel).to_string_lossy().into_owned();
+    // A root that isn't a folder stops the server before it serves.
+    let out = bin().args(["mcp", "--automation-read-root", &p("missing")]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--automation-read-root"));
+    let mut child = bin()
+        .args(["mcp", "--automation-read-root", &p("in"), "--automation-write-root", &p("out")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        let call = |id: u32, tool: &str, args: serde_json::Value| {
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": args}}).to_string()
+        };
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18"}}}}"#).unwrap();
+        writeln!(stdin, "{}", call(2, "create_node", serde_json::json!({"type": "ellipse"}))).unwrap();
+        writeln!(stdin, "{}", call(3, "save_file", serde_json::json!({"path": p("outside/a.figcraft")}))).unwrap();
+        writeln!(stdin, "{}", call(4, "save_file", serde_json::json!({"path": p("out/a.figcraft")}))).unwrap();
+        writeln!(stdin, "{}", call(5, "open_file", serde_json::json!({"path": p("outside/a.figcraft")}))).unwrap();
+        writeln!(stdin, "{}", call(6, "open_file", serde_json::json!({"path": p("out/a.figcraft")}))).unwrap();
+    }
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 6);
+    assert!(lines[0]["result"]["instructions"].as_str().unwrap().contains("only these folders may be read"));
+    let error = |i: usize| lines[i]["result"]["isError"] == true;
+    assert!(!error(1) && error(2) && !error(3) && error(4) && !error(5), "{lines:?}");
+    assert!(lines[2]["result"]["content"][0]["text"].as_str().unwrap().contains("automation path rejected"));
+    assert!(d.join("out/a.figcraft").is_file() && !d.join("outside/a.figcraft").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn commands_json_lists_everything() {
     let out = bin().args(["commands", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v.as_array().unwrap().len() > 200);
+}
+
+/// The automation roots confine the file subcommands too, not just `mcp` (#833): a read outside a
+/// root, and a write outside a write root, are refused and leave no file behind. Without the flags
+/// the same commands behave as they always did.
+#[test]
+fn file_subcommands_are_confined_to_automation_roots() {
+    let d = tmp("file-roots");
+    let _ = std::fs::remove_dir_all(&d);
+    for sub in ["in", "out"] {
+        std::fs::create_dir_all(d.join(sub)).unwrap();
+    }
+    let p = |rel: &str| d.join(rel).to_string_lossy().into_owned();
+    let out_of = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).into_owned();
+
+    // A document to work on, made unconfined.
+    std::fs::write(d.join("in/make.json"), br#"[{"command":"shape.rectangle","params":{"x":0,"y":0,"width":40,"height":20}}]"#).unwrap();
+    let made = bin().args(["run", &p("in/make.json"), "--out", &p("in/doc.figcraft")]).output().unwrap();
+    assert!(made.status.success(), "{}", out_of(&made));
+
+    // Inside the roots: renders as usual.
+    let ok = bin()
+        .args(["render", &p("in/doc.figcraft"), "-o", &p("out/ok.png"), "--automation-read-root", &p("in"), "--automation-write-root", &p("out")])
+        .output()
+        .unwrap();
+    assert!(ok.status.success(), "{}", out_of(&ok));
+    assert!(d.join("out/ok.png").is_file());
+
+    // A write outside the write root is refused, and nothing is written.
+    let escaped = d.join("escaped.png");
+    let refused = bin()
+        .args([
+            "render",
+            &p("in/doc.figcraft"),
+            "-o",
+            &escaped.to_string_lossy(),
+            "--automation-read-root",
+            &p("in"),
+            "--automation-write-root",
+            &p("out"),
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(out_of(&refused).contains("may be written"), "{}", out_of(&refused));
+    assert!(!escaped.exists(), "the refused render wrote a file anyway");
+
+    // No write root at all: writing is refused outright, reading still works.
+    let no_write = bin().args(["render", &p("in/doc.figcraft"), "-o", &p("out/no.png"), "--automation-read-root", &p("in")]).output().unwrap();
+    assert!(!no_write.status.success());
+    assert!(out_of(&no_write).contains("no folder may be written"), "{}", out_of(&no_write));
+
+    // A read outside every root is refused: `info` on the document with only `out` readable.
+    let read_refused = bin().args(["info", &p("in/doc.figcraft"), "--automation-read-root", &p("out")]).output().unwrap();
+    assert!(!read_refused.status.success());
+    assert!(out_of(&read_refused).contains("may be read"), "{}", out_of(&read_refused));
+
+    // `convert` and `run` take them as well, and a root that is not a folder is refused.
+    let missing = bin().args(["convert", &p("in/doc.figcraft"), &p("out/c.svg"), "--automation-read-root", &p("missing")]).output().unwrap();
+    assert!(!missing.status.success());
+    assert!(out_of(&missing).contains("automation-read-root"), "{}", out_of(&missing));
+
+    // Unconfined, the same render still writes wherever it is told.
+    let plain = bin().args(["render", &p("in/doc.figcraft"), "-o", &escaped.to_string_lossy()]).output().unwrap();
+    assert!(plain.status.success(), "{}", out_of(&plain));
+    assert!(escaped.is_file());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// An output path that is a symbolic link is written through, to its target, as `std::fs::write`
+/// always did. Routing the CLI's writes through `file_access` for #833 would otherwise have
+/// replaced the link with a regular file, because that write stages the bytes and renames them
+/// into place.
+#[cfg(unix)]
+#[test]
+fn an_unconfined_write_follows_a_symbolic_link() {
+    let d = tmp("symlink-out");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("real")).unwrap();
+    let p = |rel: &str| d.join(rel).to_string_lossy().into_owned();
+    std::fs::write(d.join("in.json"), br#"[{"command":"shape.rectangle","params":{"x":0,"y":0,"width":40,"height":20}}]"#).unwrap();
+    let made = bin().args(["run", &p("in.json"), "--out", &p("doc.figcraft")]).output().unwrap();
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+
+    let target = d.join("real/target.png");
+    std::fs::write(&target, b"placeholder").unwrap();
+    let link = d.join("link.png");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let out = bin().args(["render", &p("doc.figcraft"), "-o", &link.to_string_lossy()]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is still a link");
+    let written = std::fs::read(&target).unwrap();
+    assert!(written.starts_with(b"\x89PNG"), "the target holds the render, not the placeholder");
+    let _ = std::fs::remove_dir_all(&d);
 }

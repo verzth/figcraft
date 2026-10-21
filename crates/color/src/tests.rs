@@ -80,7 +80,7 @@ fn blend_names() {
 #[test]
 fn nan_inputs_are_sanitized() {
     let c = Color::new(f32::NAN, 2.0, -1.0, f32::INFINITY);
-    assert_eq!(c.to_rgba8(), [0, 255, 0, 0]);
+    assert_eq!(c.to_rgba8(), [0, 255, 0, 255]);
 }
 
 #[test]
@@ -105,4 +105,12 @@ fn crop_defaults_to_fill_and_roundtrips() {
     for (a, b) in back.iter().zip(c.iter()) {
         assert!((a - b).abs() < 1e-9);
     }
+}
+
+#[test]
+fn infinite_channels_clamp() {
+    let c = Color::parse_css("rgb(1e40, 0, 0)").unwrap();
+    assert_eq!(c.r, 1.0);
+    let c = Color::new(f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::INFINITY);
+    assert_eq!((c.r, c.g, c.b, c.a), (1.0, 0.0, 0.0, 1.0));
 }

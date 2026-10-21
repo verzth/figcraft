@@ -32,4 +32,4 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/freebsd.yml@main
     with:
       run-package-check: true
-      craft-fonts-ref: 43913056ce82a3fdad0ef69f6b88d1dc922a8104
+      craft-fonts-ref: a71c20e30af613287c504f7e685ca8fad77752bc

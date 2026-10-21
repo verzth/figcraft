@@ -92,6 +92,20 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec!("file.placeImage", "Place image", "{path | data, x?, y?}", true, super::create::place_image),
         spec!("file.close", "Close tab", "{index?, force? (discard unsaved changes)}", false, close),
+        spec!("file.moveTab", "Move tab", "{from, to} (indices among open documents)", false, |s, p| {
+            let from = req_index("file.moveTab", p, "from")?;
+            let to = req_index("file.moveTab", p, "to")?;
+            if from >= s.docs.len() || to >= s.docs.len() {
+                return Err(bad("file.moveTab", "no such document"));
+            }
+            if from != to {
+                let active_uid = s.docs.get(s.active).map(|d| d.uid);
+                let doc = s.docs.remove(from);
+                s.docs.insert(to, doc);
+                s.active = active_uid.and_then(|uid| s.docs.iter().position(|d| d.uid == uid)).unwrap_or(0);
+            }
+            Ok(json!({"index": to}))
+        }),
         spec!(
             "file.recover",
             "Recover file",
@@ -435,7 +449,7 @@ pub(crate) fn recovered(path: &str) -> Result<DocState> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn read(path: &str) -> Result<Vec<u8>> {
-    std::fs::read(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))
+    crate::file_access::read(path)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -445,11 +459,7 @@ fn read(path: &str) -> Result<Vec<u8>> {
 
 /// The bytes of file `path`, refused when it's larger than `max`.
 pub(crate) fn read_capped(path: &str, max: u64) -> Result<Vec<u8>> {
-    let meta = std::fs::metadata(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-    if !meta.is_file() || meta.len() > max {
-        return Err(EngineError::Other(format!("{path}: not a file of at most {max} bytes")));
-    }
-    read(path)
+    crate::file_access::read_capped(path, max)
 }
 
 /// Write `bytes` to `path` through a uniquely named, exclusively created staging file and one
@@ -457,7 +467,7 @@ pub(crate) fn read_capped(path: &str, max: u64) -> Result<Vec<u8>> {
 /// truncates `path`, and no file or symlink at a staging name is ever written through.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write(path: &str, bytes: &[u8]) -> Result<()> {
-    figcraft_format::write_file_atomic(std::path::Path::new(path), bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))
+    crate::file_access::write(path, bytes)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -552,6 +562,7 @@ pub(crate) fn load_fig(bytes: &[u8], name: &str) -> Option<Result<figcraft_forma
 /// Link imported instances to their mains (layer sources, overrides found by comparing values),
 /// innermost first so outer instances settle last.
 fn link_instances(doc: &mut Document) {
+    super::styles::unfold_imported_bound_alpha(doc);
     crate::style_vars::after_load(doc);
     super::styles::apply_paint_bindings_on_load(doc);
     let mut insts: Vec<(usize, NodeId)> =
@@ -577,11 +588,9 @@ fn rest_images(path: &str) -> impl Fn(&str) -> Option<Vec<u8>> {
             return None;
         }
         let dir = dir.as_ref()?;
-        ["", ".png", ".jpg", ".jpeg", ".gif", ".webp"].iter().find_map(|e| {
-            let p = dir.join(format!("{r}{e}"));
-            let meta = std::fs::metadata(&p).ok()?;
-            if meta.is_file() && meta.len() <= MAX_IMAGE_FILE { std::fs::read(&p).ok() } else { None }
-        })
+        ["", ".png", ".jpg", ".jpeg", ".gif", ".webp"]
+            .iter()
+            .find_map(|e| crate::file_access::read_capped(dir.join(format!("{r}{e}")), MAX_IMAGE_FILE).ok())
     }
 }
 
@@ -604,11 +613,7 @@ fn sibling_variables(path: &str) -> Option<Value> {
     let file = std::path::Path::new(path);
     let dir = file.parent()?;
     [format!("{}.variables.json", file_stem(path)), "variables.json".to_string()].iter().map(|n| dir.join(n)).filter(|c| c != file).find_map(|c| {
-        let meta = std::fs::metadata(&c).ok()?;
-        if !meta.is_file() || meta.len() > MAX_VARIABLES_FILE {
-            return None;
-        }
-        let v: Value = serde_json::from_slice(&std::fs::read(&c).ok()?).ok()?;
+        let v: Value = serde_json::from_slice(&crate::file_access::read_capped(c, MAX_VARIABLES_FILE).ok()?).ok()?;
         figcraft_format::rest::is_variables_json(&v).then_some(v)
     })
 }
@@ -646,20 +651,29 @@ fn remember(s: &mut Session, path: &str) {
 }
 
 fn open_recent(s: &mut Session, p: &Value) -> Result<Value> {
+    use crate::file_access::{Access, allow, allowed};
     const CMD: &str = "file.openRecent";
+    // Confined to automation roots, the recent files outside them are never listed, opened, removed
+    // or named: `index` counts the files listed.
+    let listed = |r: &String| allowed(r, Access::Read);
     if p.get("clear").and_then(Value::as_bool) == Some(true) {
-        s.prefs.recent_files.clear();
+        s.prefs.recent_files.retain(|r| !listed(r));
     }
     if let Some(gone) = string(p, "remove") {
-        s.prefs.recent_files.retain(|r| *r != gone);
+        s.prefs.recent_files.retain(|r| *r != gone || !listed(r));
     }
     let path = match (string(p, "path"), num(p, "index")) {
-        (Some(path), _) => Some(path),
-        (None, Some(i)) => Some(s.prefs.recent_files.get(i.max(0.0) as usize).cloned().ok_or_else(|| bad(CMD, "no such recent file"))?),
+        (Some(path), _) => {
+            allow(&path, Access::Read)?;
+            Some(path)
+        }
+        (None, Some(i)) => {
+            Some(s.prefs.recent_files.iter().filter(|r| listed(r)).nth(i.max(0.0) as usize).cloned().ok_or_else(|| bad(CMD, "no such recent file"))?)
+        }
         _ => None,
     };
     if let Some(path) = path {
-        if !std::path::Path::new(&path).exists() {
+        if !crate::file_access::exists(&path) {
             s.prefs.recent_files.retain(|r| *r != path);
             return Err(bad(CMD, format!("{path} no longer exists")));
         }
@@ -669,9 +683,10 @@ fn open_recent(s: &mut Session, p: &Value) -> Result<Value> {
         .prefs
         .recent_files
         .iter()
+        .filter(|r| listed(r))
         .map(|r| {
             let name = std::path::Path::new(r).file_name().map_or_else(|| r.clone(), |f| f.to_string_lossy().into_owned());
-            json!({"path": r, "name": name, "exists": std::path::Path::new(r).exists()})
+            json!({"path": r, "name": name, "exists": crate::file_access::exists(r)})
         })
         .collect();
     Ok(json!({"files": files}))
@@ -1183,7 +1198,7 @@ fn export_layers(s: &mut Session, p: &Value) -> Result<Value> {
                 let path = std::path::Path::new(d).join(&job.file);
                 // A layer name with slashes exports into folders.
                 if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                    let _ = crate::file_access::create_dir_all(parent);
                 }
                 let path = path.to_string_lossy().to_string();
                 write(&path, &bytes)?;
@@ -1373,12 +1388,34 @@ fn close(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(EngineError::Disabled("file.close".into(), "the document has unsaved changes (pass force: true to discard)".into()));
     }
     let uid = ds.uid;
+    let active_uid = s.docs.get(s.active).map(|d| d.uid);
     s.docs.remove(i);
-    if s.active >= s.docs.len() {
-        s.active = s.docs.len().saturating_sub(1);
-    }
+    // Removing a tab before the active one shifts its index; keep the same document selected.
+    s.active = active_uid.and_then(|a| s.docs.iter().position(|d| d.uid == a)).unwrap_or(i.min(s.docs.len().saturating_sub(1)));
     crate::branches::close_tabs(s, uid, None);
     ok()
+}
+
+#[cfg(test)]
+mod tab_order_tests {
+    use super::*;
+
+    #[test]
+    fn moving_and_closing_inactive_tabs_preserves_the_active_document() {
+        let mut session = Session::new();
+        for name in ["Two", "Three", "Four"] {
+            session.execute("file.new", &json!({"name": name})).unwrap();
+        }
+        session.execute("doc.switch", &json!({"index": 2})).unwrap();
+        let active_uid = session.docs[session.active].uid;
+        let moved_uid = session.docs[0].uid;
+        session.execute("file.moveTab", &json!({"from": 0, "to": 2})).unwrap();
+        assert_eq!(session.docs[2].uid, moved_uid);
+        assert_eq!(session.docs[session.active].uid, active_uid);
+        session.execute("file.close", &json!({"index": 0})).unwrap();
+        assert_eq!(session.docs[session.active].uid, active_uid);
+        assert!(session.execute("file.moveTab", &json!({"from": 0, "to": 99})).is_err());
+    }
 }
 
 /// Ctrl+Tab / Ctrl+Shift+Tab: the next or previous open document, wrapping around.

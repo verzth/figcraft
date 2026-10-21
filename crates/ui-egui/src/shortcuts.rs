@@ -102,12 +102,14 @@ pub fn handle(app: &mut FigApp, ctx: &Context, typing: bool, swallowed: Swallowe
         return;
     }
     let events: Vec<Event> = ctx.input(|i| i.events.clone());
-    if events.is_empty() {
-        return;
-    }
+    // Every frame while editing, even one without input: a frame without the IME output turns the
+    // platform's IME off, which drops the composition (macOS then types plain letters).
     let editing = app.session.ds().map(|d| d.text_edit.is_some()).unwrap_or(false);
     if editing {
         text_keys(app, ctx, &events);
+        return;
+    }
+    if events.is_empty() {
         return;
     }
     // An image-only clipboard brings no paste event: paste from the key then. The browser sends
@@ -210,6 +212,11 @@ pub fn swallowed_paste(app: &mut FigApp, ctx: &Context) -> Swallowed {
 pub fn run_binding(app: &mut FigApp, id: &str) {
     match id {
         "select.none" => {
+            if let Some(ctx) = &app.ui_context
+                && crate::proto_panel::close_editor(ctx)
+            {
+                return;
+            }
             if let Err(e) = app.session.escape() {
                 app.toast(e.to_string());
             }
@@ -228,11 +235,21 @@ pub fn run_binding(app: &mut FigApp, id: &str) {
 }
 
 fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, repeat: bool, now: f64, ctx: &Context) -> bool {
+    if key == Key::Escape && crate::proto_panel::close_editor(ctx) {
+        return true;
+    }
+    if key == Key::Escape && crate::selection_spacing::cancel(app, ctx) {
+        return true;
+    }
     if key_box(app, key, m) {
         return true;
     }
     // A gradient open in the colour picker: Delete removes its selected stop.
     if matches!(key, Key::Backspace | Key::Delete) && m.is_none() && app.ui.picker.is_some() && crate::handles::remove_selected_stop(app, ctx) {
+        return true;
+    }
+    // An interaction selected in the Prototype tab: Delete removes that interaction, not the component.
+    if matches!(key, Key::Backspace | Key::Delete) && m.is_none() && crate::proto_panel::delete_selected_interaction(app, ctx) {
         return true;
     }
     // Vector edit mode and the shape builder have their own keys (tools, nudging points, delete,
@@ -251,6 +268,9 @@ fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, re
             return true;
         }
         if !repeat || matches!(b.id, "edit.undo" | "edit.redo" | "view.zoomIn" | "view.zoomOut") {
+            if matches!(b.id, "edit.undo" | "edit.redo") && crate::selection_spacing::cancel(app, ctx) {
+                return true;
+            }
             run_binding(app, b.id);
         }
         return true;
@@ -259,7 +279,8 @@ fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, re
     if app.ui.layers_focus && !m.command && !m.alt && crate::layers::key_nav(app, key, m.shift) {
         return true;
     }
-    // Arrow nudges; with nothing selected the arrows pan the view.
+    // Arrow nudges, Alt held too (measuring stays on while the selection moves); with nothing
+    // selected the arrows pan the view.
     let (dx, dy) = match key {
         Key::ArrowLeft => (-1.0, 0.0),
         Key::ArrowRight => (1.0, 0.0),
@@ -267,7 +288,7 @@ fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, re
         Key::ArrowDown => (0.0, 1.0),
         _ => (0.0, 0.0),
     };
-    if (dx, dy) != (0.0, 0.0) && !m.alt {
+    if (dx, dy) != (0.0, 0.0) {
         if app.session.selection().is_empty() {
             app.run("view.pan", json!({"dx": dx, "dy": dy, "big": m.shift}));
         } else if m.command {
@@ -281,9 +302,9 @@ fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, re
     if m.is_none() && !repeat && opacity_digit(app, key, now) {
         return true;
     }
-    // Enter while the pen is drawing finishes it.
+    // Enter while the pen is drawing ends the path as Escape does.
     if key == Key::Enter && app.session.tool.pen.is_some() {
-        let _ = app.session.pen_finish();
+        let _ = app.session.pen_end();
         return true;
     }
     false
@@ -442,6 +463,10 @@ fn text_keys(app: &mut FigApp, ctx: &Context, events: &[Event]) {
                 }
             }
             Event::Key { key, physical_key, pressed: true, modifiers: m, .. } => {
+                // Keys during a composition are the IME's (Enter picks a candidate, Escape cancels).
+                if app.session.ds().is_ok_and(|d| d.text_edit.as_ref().is_some_and(|te| te.preedit.is_some())) {
+                    continue;
+                }
                 if (m.command || m.alt || m.ctrl) && text_shortcut(app, *key, *physical_key, *m) {
                     skip_text = true;
                     continue;
@@ -526,7 +551,8 @@ fn ime_output(app: &FigApp, ctx: &Context) {
     ctx.output_mut(|o| {
         o.ime = Some(egui::output::IMEOutput {
             purpose: egui::IMEPurpose::Normal,
-            rect: app.canvas.rect,
+            // The desktop places the candidate window by `rect` (the web by `cursor_rect`).
+            rect: cursor_rect,
             cursor_rect,
             should_interrupt_composition: false,
         })

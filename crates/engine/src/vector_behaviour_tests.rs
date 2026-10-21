@@ -439,3 +439,61 @@ fn bend_paint_bucket_cut_join_and_eraser_tools() {
     assert_eq!(net(&s, id).segments.len(), 2, "the eraser removes what it passes over");
     assert_eq!(s.doc().unwrap().node(page).unwrap().children, vec![id], "and the pieces stay one layer");
 }
+
+#[test]
+fn vector_paths_take_the_requested_size_and_refuse_empty_geometry() {
+    let mut s = Session::new();
+    let path = "M0 0 L24 0 L24 24 L0 24 Z";
+    let intrinsic = id_of(&ex(&mut s, "vector.create", json!({"path": path}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(intrinsic).unwrap();
+    assert_eq!((n.width, n.height), (24.0, 24.0), "a path without a size keeps its intrinsic box");
+    // Both sides: each scales independently, like resizing a vector.
+    let both = id_of(&ex(&mut s, "vector.create", json!({"path": path, "width": 16, "height": 8}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(both).unwrap();
+    assert_eq!((n.width, n.height), (16.0, 8.0));
+    let n = net(&s, both);
+    let max = n.vertices.iter().fold((0.0f64, 0.0f64), |(x, y), v| (x.max(v.x), y.max(v.y)));
+    assert!((max.0 - 16.0).abs() < 1e-9 && (max.1 - 8.0).abs() < 1e-9, "{max:?}: the geometry itself is scaled");
+    // One side: the other keeps its proportion.
+    let width = id_of(&ex(&mut s, "vector.create", json!({"path": path, "width": 16}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(width).unwrap();
+    assert_eq!((n.width, n.height), (16.0, 16.0));
+    // A path or point set that draws nothing is an error, not an invisible zero-size layer.
+    let e = s.execute("vector.create", &json!({"path": "M5 5"})).unwrap_err().to_string();
+    assert!(e.contains("draws nothing"), "{e}");
+    let e = s.execute("vector.create", &json!({"points": [[5, 5], [5, 5]]})).unwrap_err().to_string();
+    assert!(e.contains("draws nothing"), "{e}");
+    // A size on an axis the geometry has none of is refused, not silently ignored.
+    let e = s.execute("vector.create", &json!({"path": "M0 0 L0 24", "width": 16})).unwrap_err().to_string();
+    assert!(e.contains("horizontal extent"), "{e}");
+    let e = s.execute("vector.create", &json!({"path": "M0 0 L24 0", "height": 16})).unwrap_err().to_string();
+    assert!(e.contains("vertical extent"), "{e}");
+    // But 0 on an axis it has none of is what it already is: a horizontal line with height 0.
+    let line = id_of(&ex(&mut s, "vector.create", json!({"path": "M0 0 L24 0", "width": 16, "height": 0}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(line).unwrap();
+    assert_eq!((n.width, n.height), (16.0, 0.0));
+    // A size of 0 or less on an axis it has would flatten it, so it is refused, alone or with the other.
+    for p in [json!({"path": path, "width": 0}), json!({"path": path, "width": 16, "height": 0}), json!({"path": path, "width": -4, "height": 8})] {
+        let e = s.execute("vector.create", &p).unwrap_err().to_string();
+        assert!(e.contains("positive"), "{p}: {e}");
+    }
+}
+
+#[test]
+fn vector_points_take_the_requested_size() {
+    let mut s = Session::new();
+    let points = json!([[10, 20], [34, 20], [34, 32]]);
+    let corners = |s: &Session, id: NodeId| net(s, id).vertices.iter().map(|v| (v.x, v.y)).collect::<Vec<_>>();
+    // Both sides: each axis scales on its own; the vertices move with the box.
+    let both = id_of(&ex(&mut s, "vector.create", json!({"points": points, "x": 10, "y": 20, "width": 48, "height": 6}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(both).unwrap();
+    assert_eq!((n.width, n.height), (48.0, 6.0));
+    assert_eq!(corners(&s, both), vec![(0.0, 0.0), (48.0, 0.0), (48.0, 6.0)]);
+    // One side: the other keeps its proportion.
+    let one = id_of(&ex(&mut s, "vector.create", json!({"points": points, "height": 24}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(one).unwrap();
+    assert_eq!((n.width, n.height), (48.0, 24.0));
+    assert_eq!(corners(&s, one), vec![(0.0, 0.0), (48.0, 0.0), (48.0, 24.0)]);
+    let e = s.execute("vector.create", &json!({"points": points, "width": 16, "height": -1})).unwrap_err().to_string();
+    assert!(e.contains("positive"), "{e}");
+}

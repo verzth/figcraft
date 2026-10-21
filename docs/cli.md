@@ -29,7 +29,9 @@ be open to the public: [server.md](server.md#running-a-public-server)). See [ser
 ### `info <file> [--json]`
 
 Pages, node counts, top-level frames (id, type, name, size), style/variable/image counts. Repairs
-of a damaged file and import warnings go to stderr as `note:` lines (`notes` with `--json`).
+of a damaged file and import warnings go to stderr as `note:` lines (`notes` with `--json`). Fonts the
+file names that aren't installed are listed as `missing font` lines (`missingFonts: [{family,
+layers}]` with `--json`); their text renders in a fallback font.
 
 Every subcommand that reads a file also takes the public REST API file JSON (the response of
 `GET /v1/files/:key` or of its nodes endpoint, written to a `.json` file): it is imported on the fly.
@@ -151,18 +153,44 @@ figcraft-cli run start.json --out dashboard.figcraft
 figcraft-cli export dashboard.figcraft -o dashboard.png
 ```
 
+### Confining a run: `--automation-read-root DIR` / `--automation-write-root DIR`
+
+`info`, `export`, `convert`, `render` and `run` take these two flags, with the same meaning they
+have on [`mcp`](#mcp---attach-port---automation-read-root-dir---automation-write-root-dir): each is
+repeatable, each folder must exist, and together they confine every file that subcommand touches.
+Reads are allowed inside a read or write root, writes only inside a write root, and everything else
+is refused — so a run given only a read root cannot write at all. Without either flag a subcommand
+reads and writes as the user who started it.
+
+```sh
+# Renders in/doc.figcraft to out/ok.png and can touch nothing else.
+figcraft-cli render in/doc.figcraft -o out/ok.png \
+  --automation-read-root in --automation-write-root out
+
+figcraft-cli render in/doc.figcraft -o ./escaped.png \
+  --automation-read-root in --automation-write-root out
+# error: automation path rejected: . is outside the folders that may be written: …/out
+```
+
+This is for driving the CLI from a script or an agent that should not reach the rest of the disk;
+the flags leave the output identical when nothing strays outside the roots.
+
 ### `commands [--json] [--filter TEXT]`
 
 Every command with its label, shortcut, undoable flag (`*`) and parameter docs; `--json` for
 machines.
 
-### `mcp [--attach PORT] [--autosave]`
+### `mcp [--attach PORT] [--autosave] [--automation-read-root DIR]… [--automation-write-root DIR]…`
 
 Serve MCP on stdio: headless by default, or attached to a running app started with
 `figcraft --control PORT` (or with MCP turned on in Preferences ▸ AI agents). `--autosave` (or
 `FIGCRAFT_MCP_AUTOSAVE=1`) saves the document to its file after every tool call that changes it.
 The app's own executable serves the same attached server as `figcraft mcp [--attach PORT]`, which
-is what Preferences ▸ AI agents installs in the clients. See [mcp.md](mcp.md). The headless session can host, join and publish
+is what Preferences ▸ AI agents installs in the clients. See [mcp.md](mcp.md). The automation roots
+(each repeatable; existing folders) confine the files the agent's calls read (inside a read or
+write root) and write (inside a write root); everything else is refused
+([mcp.md › Confining file access](mcp.md#confining-file-access)). With `--attach` they are refused:
+start the app with them instead. The headless session can host, join and publish
 live sessions (`collab.*`: without a key on a server open to the public, with `collab.serverInfo`,
 `collab.manageFile` for the owner token and `collab.report`) and use plugin directories
 (`plugin.directory.*`); the one-shot `run` can't (no network link).

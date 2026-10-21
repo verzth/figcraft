@@ -661,6 +661,9 @@ fn on_corner_square(doc: &Document, sel: &[NodeId], p: Point, zoom: f64) -> bool
 /// handles: the canvas draws just its outline (the handles still answer just outside it).
 pub const SMALL_BOX_PX: f64 = 16.0;
 
+/// The stroke the Pencil draws: its colour and weight (the canvas previews it the same).
+pub const PENCIL_STROKE: (figcraft_color::Color, f64) = (figcraft_color::Color::BLACK, 2.0);
+
 /// The shorter and longer sides, in screen pixels, of the box with `corners` (tl, tr, br, bl).
 pub fn box_sides_px(corners: &[Point; 4], zoom: f64) -> (f64, f64) {
     let [a, b, _, d] = corners;
@@ -1297,7 +1300,7 @@ impl Session {
                         for i in &ids {
                             let parent = doc.get(*i)?.parent.unwrap_or(page);
                             let idx = doc.index_in_parent(*i).map(|x| x + 1);
-                            copies.push(doc.duplicate_into(*i, parent, idx)?);
+                            copies.push(crate::components::copy_in_file(doc, *i, parent, idx)?);
                         }
                         moving = copies;
                         *sel = moving.clone();
@@ -1859,6 +1862,20 @@ impl Session {
         if self.tool.tool == ToolId::Pen {
             return self.pen_finish();
         }
+        // A frame's or section's name label: rename it there (the canvas puts a field over it).
+        // Labels come before widgets, as on a press; the second press began a move: undo it.
+        if matches!(self.tool.tool, ToolId::Move | ToolId::Scale)
+            && !(ev.shift || ev.cmd || ev.alt)
+            && let Some(id) = label_at(&doc, page, &self.tool.labels, ev.p())
+        {
+            self.tool.gesture = Gesture::None;
+            self.cancel_interaction()?;
+            if sel != [id] {
+                self.set_selection(vec![id]);
+            }
+            self.request_ui("canvas.renameLabel", serde_json::json!({"id": id}));
+            return Ok(());
+        }
         // Quick clicks on a widget's clickable part are clicks, one by one.
         if matches!(self.tool.tool, ToolId::Move | ToolId::Scale)
             && !(ev.shift || ev.cmd || ev.alt)
@@ -2051,13 +2068,7 @@ impl Session {
         if self.tool.pen.is_none()
             && let Some((id, v)) = selected_end_at(&doc, &self.selection(), ev.p(), 8.0 / ev.zoom.max(1e-6))
         {
-            self.set_tool(ToolId::Move);
-            crate::vectoredit::begin(self, id)?;
-            crate::vectoredit::set_tool(self, crate::vectoredit::VTool::Pen)?;
-            return crate::vectoredit::set_state(self, |e| {
-                e.anchor = Some(v);
-                e.vertices = vec![v];
-            });
+            return self.pen_edit(id, Some(v));
         }
         let pen = self.tool.pen.get_or_insert_with(PenPath::default);
         // Clicking the first anchor closes the path.
@@ -2175,7 +2186,30 @@ impl Session {
         Ok(())
     }
 
-    /// Finish the pen path (Enter/Escape/double-click).
+    /// Edit `id` as a vector with the pen, going on from point `anchor` (or, without one, starting
+    /// a new path in the same layer at the next click).
+    fn pen_edit(&mut self, id: NodeId, anchor: Option<usize>) -> Result<()> {
+        self.set_tool(ToolId::Move);
+        crate::vectoredit::begin(self, id)?;
+        crate::vectoredit::set_tool(self, crate::vectoredit::VTool::Pen)?;
+        crate::vectoredit::set_state(self, |e| {
+            e.anchor = anchor;
+            e.vertices = anchor.into_iter().collect();
+        })
+    }
+
+    /// Enter/Escape while the pen draws: the path ends but its layer stays in edit mode with the
+    /// pen, so the next path joins the same vector (another Escape leaves edit mode).
+    pub fn pen_end(&mut self) -> Result<()> {
+        let id = self.tool.pen.as_ref().and_then(|p| p.id);
+        self.pen_finish()?;
+        match id {
+            Some(id) if self.doc()?.contains(id) => self.pen_edit(id, None),
+            _ => Ok(()),
+        }
+    }
+
+    /// Finish the pen path (and keep the pen tool: double-click, Delete, a tool switch).
     pub fn pen_finish(&mut self) -> Result<()> {
         let pen = self.tool.pen.take();
         self.tool.overlay.pen.clear();
@@ -2210,8 +2244,8 @@ impl Session {
         let mut local = fitted.clone();
         local.apply_affine(pw.inverse());
         let _ = d;
-        let mut props =
-            json!({"fills": [], "strokes": ["#000000"], "strokeWeight": 2, "strokeCap": "round", "strokeJoin": "round", "strokeAlign": "center"});
+        let (color, weight) = PENCIL_STROKE;
+        let mut props = json!({"fills": [], "strokes": [color.to_css_hex()], "strokeWeight": weight, "strokeCap": "round", "strokeJoin": "round", "strokeAlign": "center"});
         // Pen pressure becomes the stroke's width profile (brushes follow it too).
         if let Some(points) = pressure_profile(points, pressure) {
             props["widthProfile"] = json!(points);
@@ -2320,7 +2354,7 @@ impl Session {
             return Ok(());
         }
         if self.tool.pen.is_some() {
-            return self.pen_finish();
+            return self.pen_end();
         }
         if self.tool.busy() {
             self.tool.gesture = Gesture::None;

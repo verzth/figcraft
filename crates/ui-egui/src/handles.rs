@@ -11,10 +11,17 @@ use figcraft_geom::Point;
 use serde_json::json;
 
 use crate::colorpicker::PickerTarget;
-use crate::theme::{ACCENT, semibold};
+use crate::theme::semibold;
 use crate::{FigApp, RightTab};
 
-const PINK: Color32 = Color32::from_rgb(0xF2, 0x48, 0x8C);
+pub(crate) const PINK: Color32 = Color32::from_rgb(0xF2, 0x48, 0x8C);
+
+pub(crate) fn pink_label(painter: &egui::Painter, label: String, center: Pos2) {
+    let galley = painter.layout_no_wrap(label, semibold(10.0), Color32::WHITE);
+    let rect = Rect::from_center_size(center, galley.size() + vec2(8.0, 4.0));
+    painter.rect_filled(rect, CornerRadius::same(3), PINK);
+    painter.galley(rect.min + vec2(4.0, 2.0), galley, Color32::WHITE);
+}
 
 #[derive(Clone, Debug)]
 enum Drag {
@@ -286,7 +293,12 @@ pub fn draw(app: &FigApp, painter: &egui::Painter) {
             painter.rect_filled(r, CornerRadius::same(2), crate::theme::doc_c32(painter.ctx(), s.color.with_alpha(1.0)));
             painter.rect_stroke(r, CornerRadius::same(2), Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
             if i == selected {
-                painter.rect_stroke(r.expand(2.0), CornerRadius::same(3), Stroke::new(1.5, ACCENT), StrokeKind::Outside);
+                painter.rect_stroke(
+                    r.expand(2.0),
+                    CornerRadius::same(3),
+                    Stroke::new(1.5, crate::theme::canvas_accent(painter.ctx())),
+                    StrokeKind::Outside,
+                );
             }
         }
         for (i, p) in [a, b, c].iter().enumerate() {
@@ -294,7 +306,7 @@ pub fn draw(app: &FigApp, painter: &egui::Painter) {
                 continue;
             }
             painter.circle_filled(*p, 5.0, Color32::WHITE);
-            painter.circle_stroke(*p, 5.0, Stroke::new(1.5, ACCENT));
+            painter.circle_stroke(*p, 5.0, Stroke::new(1.5, crate::theme::canvas_accent(painter.ctx())));
         }
         return;
     }
@@ -304,8 +316,8 @@ pub fn draw(app: &FigApp, painter: &egui::Painter) {
         painter.line_segment([a, b], Stroke::new(1.0, Color32::from_black_alpha(120)));
         // The start is hollow (least blur), the end filled (most blur by default).
         painter.circle_filled(a, 5.0, Color32::WHITE);
-        painter.circle_stroke(a, 5.0, Stroke::new(1.5, ACCENT));
-        painter.circle_filled(b, 5.0, ACCENT);
+        painter.circle_stroke(a, 5.0, Stroke::new(1.5, crate::theme::canvas_accent(painter.ctx())));
+        painter.circle_filled(b, 5.0, crate::theme::canvas_accent(painter.ctx()));
         painter.circle_stroke(b, 5.0, Stroke::new(1.5, Color32::WHITE));
         return;
     }
@@ -313,11 +325,11 @@ pub fn draw(app: &FigApp, painter: &egui::Painter) {
         let Some(c) = crop_corners(app, id, r) else { return };
         let outline = vec![c[0], c[1], c[2], c[3], c[0]];
         painter.add(Shape::line(outline.clone(), Stroke::new(2.0, Color32::WHITE)));
-        painter.add(Shape::line(outline, Stroke::new(1.0, ACCENT)));
+        painter.add(Shape::line(outline, Stroke::new(1.0, crate::theme::canvas_accent(painter.ctx()))));
         for p in c {
             let hr = Rect::from_center_size(p, vec2(8.0, 8.0));
             painter.rect_filled(hr, CornerRadius::ZERO, Color32::WHITE);
-            painter.rect_stroke(hr, CornerRadius::ZERO, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+            painter.rect_stroke(hr, CornerRadius::ZERO, Stroke::new(1.0, crate::theme::canvas_accent(painter.ctx())), StrokeKind::Inside);
         }
         return;
     }
@@ -338,11 +350,7 @@ pub fn draw(app: &FigApp, painter: &egui::Painter) {
         let hot = hover.is_some_and(|h| r.contains(h)) || active_side == Some(*side);
         if hot {
             painter.rect_filled(*r, CornerRadius::ZERO, PINK.gamma_multiply(0.25));
-            let label = crate::canvas::fmt(*v);
-            let galley = painter.layout_no_wrap(label, semibold(10.0), Color32::WHITE);
-            let lr = Rect::from_center_size(r.center(), galley.size() + vec2(8.0, 4.0));
-            painter.rect_filled(lr, CornerRadius::same(3), PINK);
-            painter.galley(lr.min + vec2(4.0, 2.0), galley, Color32::WHITE);
+            pink_label(painter, crate::canvas::fmt(*v), r.center());
         }
     }
     let drag_key = match &dragging {
@@ -356,10 +364,7 @@ pub fn draw(app: &FigApp, painter: &egui::Painter) {
             painter.rect_filled(r, CornerRadius::ZERO, PINK.gamma_multiply(0.3));
             let c = r.center();
             painter.line_segment([pos2(c.x - 3.0, c.y), pos2(c.x + 3.0, c.y)], Stroke::new(1.0, PINK));
-            let galley = painter.layout_no_wrap(crate::canvas::fmt(g.value), semibold(10.0), Color32::WHITE);
-            let lr = Rect::from_center_size(c, galley.size() + vec2(8.0, 4.0));
-            painter.rect_filled(lr, CornerRadius::same(3), PINK);
-            painter.galley(lr.min + vec2(4.0, 2.0), galley, Color32::WHITE);
+            pink_label(painter, crate::canvas::fmt(g.value), c);
         }
     }
     let _ = Align2::CENTER_CENTER;

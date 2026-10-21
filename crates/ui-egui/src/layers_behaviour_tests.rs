@@ -200,6 +200,81 @@ fn page_row(u: &mut Ui, page: NodeId, back: NodeId) -> Pos2 {
 }
 
 #[test]
+fn pages_search_button_opens_the_filter_and_escape_clears_it() {
+    let s = Session::new();
+    let _ = s.page().unwrap();
+    let mut u = Ui::new(s);
+
+    // The search icon in the Pages header opens the page-name field, not Find and Replace.
+    click(&mut u, Pos2::new(246.0, 124.0), Modifiers::NONE);
+    assert!(u.app.ui.page_search, "the Pages search is open");
+    assert!(u.app.ui.find.is_none(), "page search does not open Find and Replace");
+    u.frame(vec![Event::Text("COMPON".into())]);
+    assert_eq!(u.app.ui.page_filter, "COMPON", "typing can start immediately");
+    u.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+    assert!(!u.app.ui.page_search, "Escape closes page search");
+    assert!(u.app.ui.page_filter.is_empty(), "Escape clears the filter");
+}
+
+#[test]
+fn pages_search_leaves_escape_to_the_canvas_when_the_field_is_unfocused() {
+    let mut s = Session::new();
+    let r = rect(&mut s, "r", 0.0, None);
+    s.execute("select.set", &json!({"ids": [r]})).unwrap();
+    let mut u = Ui::new(s);
+    u.app.ui.page_search = true;
+    u.app.ui.page_filter = "COMPON".into();
+    u.frame(vec![]);
+
+    u.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+
+    assert!(u.app.session.selection().is_empty(), "Escape deselects on the canvas");
+    assert!(u.app.ui.page_search, "the page search stays open");
+    assert_eq!(u.app.ui.page_filter, "COMPON", "and keeps its filter");
+}
+
+#[test]
+fn escape_in_the_pages_search_does_not_reach_the_canvas() {
+    let mut s = Session::new();
+    let r = rect(&mut s, "r", 0.0, None);
+    s.execute("select.set", &json!({"ids": [r]})).unwrap();
+    let mut u = Ui::new(s);
+    click(&mut u, Pos2::new(246.0, 124.0), Modifiers::NONE);
+    assert!(u.app.ui.page_search);
+    u.frame(vec![Event::Text("x".into())]);
+    u.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+    assert!(!u.app.ui.page_search, "Escape closes the page search");
+    assert_eq!(u.app.session.selection(), vec![r], "and leaves the selection alone");
+}
+
+#[test]
+fn pages_search_filters_page_names_case_insensitively() {
+    let mut s = Session::new();
+    let _overview = s.page().unwrap();
+    let components = id(s.execute("page.add", &json!({"name": "Components"})).unwrap());
+    let library = id(s.execute("page.add", &json!({"name": "Library"})).unwrap());
+    s.execute("page.select", &json!({"id": library})).unwrap();
+    let mut u = Ui::new(s);
+    u.app.ui.page_search = true;
+    u.app.ui.page_filter = "COMPON".into();
+    let shapes = u.frame_output(vec![]).shapes;
+    let text = crate::live_tests::texts(&crate::live_tests::flat(&shapes));
+    assert!(text.iter().any(|(label, _, _)| label == "Components"), "the matching page remains visible");
+    assert!(!text.iter().any(|(label, _, _)| label == "Library"), "nonmatching pages are filtered out");
+
+    // Search leaves only Components; the active page starts as Library.
+    for y in (150..400).step_by(4) {
+        let p = Pos2::new(150.0, y as f32);
+        u.button(p, true);
+        u.button(p, false);
+        if u.app.session.page().unwrap() == components {
+            break;
+        }
+    }
+    assert_eq!(u.app.session.page().unwrap(), components, "matching is case-insensitive and opens the named page");
+}
+
+#[test]
 fn pages_drag_to_reorder_and_dividers_open_nothing() {
     let mut s = Session::new();
     let p1 = s.page().unwrap();

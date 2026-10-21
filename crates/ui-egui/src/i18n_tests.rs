@@ -135,6 +135,7 @@ fn dynamic_labels() -> Vec<&'static str> {
     v.extend(Group::ALL.iter().map(|g| g.label()));
     v.extend(GESTURES.iter().flat_map(|(_, label, mac, other)| [*label, *mac, *other]));
     v.extend(DATA_LABELS);
+    v.push(figcraft_engine::live::TOO_LARGE_TO_JOIN);
     // The starter templates' names, descriptions and kinds.
     v.extend(figcraft_engine::templates::TEMPLATES.iter().flat_map(|t| [t.name, t.description, t.kind.label()]));
     v
@@ -166,8 +167,9 @@ fn used_keys() -> BTreeSet<String> {
 }
 
 /// The importers' fixed notes: the string literals passed to `warn` in the `.fig` and REST import
-/// sources. The import report shows a note translated when the catalog has it, so an entry for one
-/// counts as used, and an entry for a note the importers no longer give shows up as unused.
+/// sources. The import report shows a note translated when the catalog has it, so each one is a key
+/// `en.toml` (and every complete language) must have, and an entry for a note the importers no
+/// longer give shows up as unused.
 fn importer_notes() -> BTreeSet<String> {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../format/src");
     let mut keys = BTreeSet::new();
@@ -249,11 +251,10 @@ fn english() -> &'static Lang {
 
 #[test]
 fn every_key_in_the_code_is_in_the_english_catalog_and_no_other() {
-    let used: BTreeSet<String> = used_keys().into_iter().chain(dynamic_keys()).collect();
+    let used: BTreeSet<String> = used_keys().into_iter().chain(dynamic_keys()).chain(importer_notes()).collect();
     let en: BTreeSet<String> = english().ui.iter().map(|(k, _)| k.to_string()).collect();
     let missing: Vec<_> = used.difference(&en).collect();
-    let notes = importer_notes();
-    let unused: Vec<_> = en.difference(&used).filter(|k| !notes.contains(*k)).collect();
+    let unused: Vec<_> = en.difference(&used).collect();
     assert!(
         missing.is_empty(),
         "keys missing from locales/en.toml:\n{}",
@@ -328,6 +329,14 @@ fn lookups_fall_back_to_english_and_fill_placeholders() {
 }
 
 #[test]
+fn a_live_failure_the_ui_knows_is_read_back_for_translation() {
+    use figcraft_engine::live::TOO_LARGE_TO_JOIN;
+    let reason = TOO_LARGE_TO_JOIN.replace("{mb}", "1024");
+    assert!(matches!(crate::live::failure_text(&reason), std::borrow::Cow::Owned(t) if t == reason));
+    assert!(matches!(crate::live::failure_text("Couldn't reach the server"), std::borrow::Cow::Borrowed(_)));
+}
+
+#[test]
 fn system_languages_pick_the_first_one_with_a_catalog() {
     let code = |pref: &str, system: Option<&str>| LANGS[resolve(pref, system)].code;
     assert_eq!(code("system", Some("fr-CA")), "fr");
@@ -343,11 +352,12 @@ fn system_languages_pick_the_first_one_with_a_catalog() {
     // Portugal's Portuguese and a bare "pt" read the Brazilian catalog.
     assert_eq!(code("system", Some("pt-PT")), "pt-BR");
     assert_eq!(code("pt", None), "pt-BR");
-    // An OS list: the first language there is a catalog for (English counts).
-    assert_eq!(code("system", Some("nl-NL,de-DE,en-US")), "de");
-    assert_eq!(code("system", Some("nl-NL, en-US,fr-FR")), "en");
-    assert_eq!(code("system", Some("nl,da")), "en");
-    assert_eq!(code("system", Some("nl,sv")), "sv");
+    // An OS list: the first language there is a catalog for (English counts). Hindi has no
+    // catalog (Dutch gained one; `hi` keeps exercising the no-catalog path).
+    assert_eq!(code("system", Some("hi-IN,de-DE,en-US")), "de");
+    assert_eq!(code("system", Some("hi-IN, en-US,fr-FR")), "en");
+    assert_eq!(code("system", Some("hi,da")), "en");
+    assert_eq!(code("system", Some("hi,sv")), "sv");
     assert_eq!(code("fr", Some("de-DE")), "fr", "a chosen language beats the system's");
 }
 
@@ -399,7 +409,7 @@ fn french_and_portuguese_count_zero_as_singular() {
     for code in ["fr", "pt-BR"] {
         assert!(one(code, 0) && one(code, 1) && !one(code, 2), "{code}");
     }
-    for code in ["en", "es", "de", "cs"] {
+    for code in ["en", "es", "de", "cs", "pl"] {
         for n in [0, 1, 2, 3, 4, 5, 21] {
             assert_eq!(one(code, n), n == 1, "{code}: {n}");
         }
@@ -418,6 +428,41 @@ fn japanese_korean_and_chinese_have_no_plural_forms() {
         let ones: Vec<_> = LANGS[lang].ui.iter().filter(|(_, t)| matches!(t, Text::Plural { one: Some(_), .. })).map(|(k, _)| k).collect();
         assert!(ones.is_empty(), "{code}: plural entries give only `other`: {ones:?}");
     }
+}
+
+#[test]
+fn georgian_is_a_draft_with_count_neutral_plurals() {
+    let code = |pref: &str, system: Option<&str>| LANGS[resolve(pref, system)].code;
+    for tag in ["ka", "ka-GE", "ka_GE.UTF-8"] {
+        assert_eq!(code("system", Some(tag)), "ka", "{tag}");
+    }
+    let ka = LANGS.iter().position(|l| l.code == "ka").unwrap();
+    assert!(LANGS[ka].draft && LANGS[ka].name == "ქართული");
+    // A noun stays singular after a numeral: both forms read the same where English counts in both.
+    for (k, t) in LANGS[ka].ui {
+        if let (Text::Plural { one: Some(one), other, .. }, Some(Text::Plural { one: Some(en_one), .. })) = (t, find(english().ui, k)) {
+            assert!(!en_one.contains("{n}") || one == other, "ka: {k:?}");
+        }
+    }
+}
+
+/// Release builds embed craft-fonts' Noto Sans Georgian (`theme::install_fonts`' built-in faces),
+/// since Inter and egui's fonts have no Georgian: it draws every Georgian letter the catalog uses.
+#[test]
+fn the_built_in_georgian_face_draws_the_georgian_catalog() {
+    let Some(face) = figcraft_text::find_face("Noto Sans Georgian", "Regular").filter(|f| f.family == "Noto Sans Georgian") else {
+        eprintln!("built without craft-fonts' Noto Sans Georgian; skipping");
+        return;
+    };
+    let ka = &LANGS[LANGS.iter().position(|l| l.code == "ka").unwrap()];
+    let georgian = |c: &char| matches!(u32::from(*c), 0x10A0..=0x10FF | 0x1C90..=0x1CBF | 0x2D00..=0x2D2F);
+    let mut letters: BTreeSet<char> = BTreeSet::new();
+    for (_, t) in ka.ui.iter().chain(ka.commands).chain(ka.menu) {
+        letters.extend(forms(t).into_iter().flat_map(str::chars).filter(georgian));
+    }
+    assert!(letters.len() > 30, "{letters:?}");
+    let missing: String = letters.iter().filter(|c| !face.has_char(**c)).collect();
+    assert!(missing.is_empty(), "no glyph for {missing:?}");
 }
 
 #[test]
@@ -472,7 +517,7 @@ fn russian_language_tags_and_integer_plurals() {
         assert_eq!(resolve(tag, None), ru, "{tag}");
         assert_eq!(resolve("system", Some(tag)), ru, "{tag}");
     }
-    assert_eq!(resolve("system", Some("nl,ru-RU,en-US")), ru);
+    assert_eq!(resolve("system", Some("hi,ru-RU,en-US")), ru);
     for n in [1, 21, 31, 101, 1_001] {
         assert_eq!(plural("ru", n), Plural::One, "{n}");
         assert_eq!(fill(counted(ru, "{n} layers", n), &[("n", &n)]), format!("{n} слой"));
@@ -488,6 +533,27 @@ fn russian_language_tags_and_integer_plurals() {
     for (key, text) in LANGS[ru].ui {
         if let Text::Plural { one, few, many, .. } = text {
             assert!(one.is_some() && few.is_some() && many.is_some(), "{key}: missing Russian plural forms");
+        }
+    }
+}
+
+#[test]
+fn polish_integer_plurals() {
+    let pl = LANGS.iter().position(|l| l.code == "pl").unwrap();
+    assert_eq!(LANGS[pl].name, "Polski");
+    assert_eq!(plural("pl", 1), Plural::One);
+    assert_eq!(fill(counted(pl, "{n} layers", 1), &[("n", &1)]), "1 warstwa");
+    for n in [2, 3, 4, 22, 23, 24, 102, 104, 1_002] {
+        assert_eq!(plural("pl", n), Plural::Few, "{n}");
+        assert_eq!(fill(counted(pl, "{n} layers", n), &[("n", &n)]), format!("{n} warstwy"));
+    }
+    for n in [0, 5, 10, 11, 12, 13, 14, 19, 20, 21, 25, 31, 100, 101, 111, 112, 114, 1_000_000] {
+        assert_eq!(plural("pl", n), Plural::Many, "{n}");
+        assert_eq!(fill(counted(pl, "{n} layers", n), &[("n", &n)]), format!("{n} warstw"));
+    }
+    for (key, text) in LANGS[pl].ui {
+        if let Text::Plural { one, few, many, .. } = text {
+            assert!(one.is_some() && few.is_some() && many.is_some(), "{key}: missing Polish plural forms");
         }
     }
 }

@@ -110,16 +110,26 @@ pub fn specs() -> Vec<CommandSpec> {
             ))
         }),
         spec!("variable.createCollection", "Create variable collection", "{name, modes? [names]}", true, |s, p| {
-            let name = req_string("variable.createCollection", p, "name")?;
-            let doc = s.doc_mut()?;
-            if doc.variables.collections.iter().any(|c| c.name == name) {
-                return Err(bad("variable.createCollection", format!("a collection named `{name}` already exists")));
+            let cmd = "variable.createCollection";
+            let name = req_string(cmd, p, "name")?.trim().to_string();
+            if name.is_empty() {
+                return Err(bad(cmd, "name can't be empty"));
             }
-            let id = doc.new_collection_id();
             let modes: Vec<String> = match get(p, "modes") {
-                Some(Value::Array(a)) => a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect(),
+                Some(Value::Array(a)) => a.iter().filter_map(|m| m.as_str().map(|m| m.trim().to_string())).collect(),
                 _ => vec!["Mode 1".into()],
             };
+            if modes.is_empty() {
+                return Err(bad(cmd, "a collection needs at least one mode"));
+            }
+            if modes.iter().any(String::is_empty) {
+                return Err(bad(cmd, "mode names can't be empty"));
+            }
+            let doc = s.doc_mut()?;
+            if doc.variables.collections.iter().any(|c| c.name == name) {
+                return Err(bad(cmd, format!("a collection named `{name}` already exists")));
+            }
+            let id = doc.new_collection_id();
             let modes = modes.into_iter().enumerate().map(|(i, m)| Mode { id: format!("{id}/mode{}", i + 1), name: m }).collect();
             doc.variables.collections.push(Collection { id: id.clone(), name, modes, extends: None });
             Ok(json!({"id": id}))
@@ -458,10 +468,19 @@ fn bind_style(s: &mut Session, p: &Value) -> Result<Value> {
     match var {
         Some((_, kind)) if kind != want => return Err(bad(cmd, format!("`{field}` takes a {} variable, not a {} one", want.id(), kind.id()))),
         Some((id, _)) => {
+            if style.bound.get(&key) != Some(&id)
+                && let StyleKind::Paint { paints } = &mut style.kind
+            {
+                rebind_paint_alpha(paints, &mut [], &key, true);
+            }
             style.bound.insert(key, id);
         }
         None => {
-            style.bound.remove(&key);
+            if style.bound.remove(&key).is_some()
+                && let StyleKind::Paint { paints } = &mut style.kind
+            {
+                rebind_paint_alpha(paints, &mut [], &key, false);
+            }
         }
     }
     // The style takes its default-mode value, and each layer using it its own.
@@ -770,14 +789,39 @@ pub fn bind(s: &mut Session, p: &Value) -> Result<Value> {
         let n = doc.get_mut(i)?;
         match &vid {
             Some(v) => {
+                if n.bound.get(&field) != Some(v) {
+                    rebind_paint_alpha(&mut n.fills, &mut n.strokes, &field, true);
+                }
                 n.bound.insert(field.clone(), v.clone());
             }
             None => {
-                n.bound.remove(&field);
+                if n.bound.remove(&field).is_some() {
+                    rebind_paint_alpha(&mut n.fills, &mut n.strokes, &field, false);
+                }
             }
         }
     }
     ok()
+}
+
+/// A colour variable bound to a solid paint owns its whole colour, alpha included. Binding restarts
+/// the opacity (which holds the alpha a typed colour had, see `Paint::solid`) at 1, so the
+/// variable's alpha applies once; unbinding moves the colour's alpha back into the opacity, where a
+/// typed colour keeps it. An opacity set while bound multiplies on top and stays.
+pub(crate) fn rebind_paint_alpha(fills: &mut [Paint], strokes: &mut [Paint], field: &str, bind: bool) {
+    use super::lists::{BoundList, list_binding};
+    let Some((list, i, "color")) = list_binding(field) else { return };
+    let paints = match list {
+        BoundList::Fills => fills,
+        BoundList::Strokes => strokes,
+        _ => return,
+    };
+    if let Some(p) = paints.get_mut(i)
+        && let PaintKind::Solid { color } = &mut p.kind
+    {
+        p.opacity = if bind { 1.0 } else { p.opacity * color.a };
+        color.a = 1.0;
+    }
 }
 
 /// `variable.setMode`: choose a collection's mode on frames (the page when none are given).
@@ -916,6 +960,147 @@ pub fn apply_bindings_to(doc: &mut Document, only: Option<&std::collections::BTr
     apply_bindings_matching(doc, only, |_| true);
 }
 
+/// The layers `ids` before an explicit edit, for [`detach_edited`] (only those with bindings).
+pub(crate) fn bound_before(doc: &Document, ids: &[NodeId]) -> Vec<std::sync::Arc<Node>> {
+    ids.iter().filter_map(|i| doc.node_arc(*i)).filter(|n| !n.bound.is_empty()).cloned().collect()
+}
+
+/// An explicit edit sticks: each layer's own bound field (not a list item's) whose value the edit
+/// changed drops its binding, which would otherwise write the variable's value back (#809).
+/// Compared by value, so keys written unchanged keep their bindings and fields moved along with
+/// another (proportions, min/max) lose theirs.
+pub(crate) fn detach_edited(doc: &mut Document, before: &[std::sync::Arc<Node>]) {
+    for old in before {
+        let Some(n) = doc.node(old.id) else { continue };
+        let edited: Vec<String> = n
+            .bound
+            .keys()
+            // A binding the edit itself made (`boundVariables`) stays.
+            .filter(|f| old.bound.get(*f) == n.bound.get(*f))
+            .filter(|f| super::lists::list_binding(f).is_none() && !f.starts_with(crate::components::PROP_BINDING))
+            .filter(|f| bound_field(old, f) != bound_field(n, f))
+            .cloned()
+            .collect();
+        if edited.is_empty() {
+            continue;
+        }
+        if let Ok(n) = doc.get_mut(old.id) {
+            for f in edited {
+                n.bound.remove(&f);
+            }
+        }
+    }
+}
+
+/// The stored value a layer-level binding writes, comparable (`None`: the layer has no such field).
+fn bound_field(n: &Node, field: &str) -> Option<String> {
+    let text = |f: &dyn Fn(&TextStyle) -> String| match &n.kind {
+        NodeKind::Text(t) => Some(std::iter::once(&t.style).chain(t.runs.iter().map(|r| &r.style)).map(f).collect::<Vec<_>>().join(",")),
+        _ => None,
+    };
+    let layout = n.layout.as_ref();
+    let cl = &n.child_layout;
+    let pad = |i: usize| layout.and_then(|l| l.padding.get(i).copied());
+    Some(match field {
+        "width" => format!("{}", n.width),
+        "height" => format!("{}", n.height),
+        "minWidth" => format!("{:?}", cl.min_w),
+        "maxWidth" => format!("{:?}", cl.max_w),
+        "minHeight" => format!("{:?}", cl.min_h),
+        "maxHeight" => format!("{:?}", cl.max_h),
+        "opacity" => format!("{}", n.opacity),
+        "visible" => format!("{}", n.visible),
+        "gap" | "columnGap" => format!("{:?}", layout.map(|l| l.gap)),
+        "crossGap" | "rowGap" => format!("{:?}", layout.map(|l| l.cross_gap)),
+        "padding" => format!("{:?}", layout.map(|l| l.padding)),
+        "paddingTop" => format!("{:?}", pad(0)),
+        "paddingRight" => format!("{:?}", pad(1)),
+        "paddingBottom" => format!("{:?}", pad(2)),
+        "paddingLeft" => format!("{:?}", pad(3)),
+        "paddingHorizontal" => format!("{:?}", (pad(1), pad(3))),
+        "paddingVertical" => format!("{:?}", (pad(0), pad(2))),
+        "cornerRadius" => format!("{:?}", n.corners.radii),
+        "topLeftRadius" => format!("{:?}", n.corners.radii.first()),
+        "topRightRadius" => format!("{:?}", n.corners.radii.get(1)),
+        "bottomRightRadius" => format!("{:?}", n.corners.radii.get(2)),
+        "bottomLeftRadius" => format!("{:?}", n.corners.radii.get(3)),
+        "strokeWeight" => format!("{:?}", (n.stroke.weight, n.stroke.sides)),
+        "strokeTopWeight" | "strokeRightWeight" | "strokeBottomWeight" | "strokeLeftWeight" => format!("{:?}", n.stroke.sides),
+        "arcStart" | "arcSweep" | "arcInner" => match &n.kind {
+            NodeKind::Ellipse { start, sweep, inner } => format!(
+                "{}",
+                if field == "arcStart" {
+                    start
+                } else if field == "arcSweep" {
+                    sweep
+                } else {
+                    inner
+                }
+            ),
+            _ => return None,
+        },
+        "characters" => match &n.kind {
+            NodeKind::Text(t) => t.characters.clone(),
+            _ => return None,
+        },
+        "paragraphSpacing" | "paragraphIndent" => match &n.kind {
+            NodeKind::Text(t) => format!("{}", if field == "paragraphSpacing" { t.paragraph_spacing } else { t.paragraph_indent }),
+            _ => return None,
+        },
+        "fontFamily" => text(&|s| s.font_family.clone())?,
+        "fontStyle" => text(&|s| s.font_style.clone())?,
+        "fontWeight" => text(&|s| s.weight().to_string())?,
+        "fontSize" => text(&|s| s.font_size.to_string())?,
+        "lineHeight" => text(&|s| format!("{:?}", s.line_height))?,
+        "letterSpacing" => text(&|s| format!("{:?}", s.letter_spacing))?,
+        // shortcut: other layer-level fields keep their binding on edits; add a reader when one is bound in practice.
+        _ => return None,
+    })
+}
+
+/// Imported files (`.fig`, REST) keep a solid paint's alpha in its opacity, a bound paint's too,
+/// while the bound colour brings its own alpha: take the variable's alpha back out of the opacity
+/// (styles' paints and layers') before the bindings are first resolved, so it applies once.
+pub(crate) fn unfold_imported_bound_alpha(doc: &mut Document) {
+    use super::lists::{BoundList, list_binding};
+    fn alphas(vars: &Variables, bound: &BTreeMap<String, VariableId>, modes: &BTreeMap<CollectionId, ModeId>) -> Vec<(BoundList, usize, f32)> {
+        let found = bound.iter().filter_map(|(field, var)| match (list_binding(field)?, vars.resolve(var, modes)?) {
+            ((list @ (BoundList::Fills | BoundList::Strokes), i, "color"), VariableValue::Color(c)) if c.a > 0.0 && c.a < 1.0 => Some((list, i, c.a)),
+            _ => None,
+        });
+        found.collect()
+    }
+    fn unfold(p: Option<&mut Paint>, a: f32) {
+        if let Some(p) = p
+            && matches!(p.kind, PaintKind::Solid { .. })
+        {
+            p.opacity = (p.opacity / a).min(1.0);
+        }
+    }
+    let pending = doc.take_dirty();
+    for i in 0..doc.styles.len() {
+        let found = doc.styles.get(i).map(|s| alphas(&doc.variables, &s.bound, &BTreeMap::new())).unwrap_or_default();
+        if let Some(StyleKind::Paint { paints }) = doc.styles.get_mut(i).filter(|_| !found.is_empty()).map(|s| &mut s.kind) {
+            for (_, j, a) in found {
+                unfold(paints.get_mut(j), a);
+            }
+        }
+    }
+    let ids: Vec<NodeId> = doc.nodes().filter(|n| !n.bound.is_empty()).map(|n| n.id).collect();
+    for id in ids {
+        let found = doc.node(id).map(|n| alphas(&doc.variables, &n.bound, &doc.modes_for(id))).unwrap_or_default();
+        if found.is_empty() {
+            continue;
+        }
+        let Ok(n) = doc.get_mut(id) else { continue };
+        for (list, j, a) in found {
+            unfold(if list == BoundList::Fills { n.fills.get_mut(j) } else { n.strokes.get_mut(j) }, a);
+        }
+    }
+    doc.take_dirty();
+    doc.mark_dirty(pending);
+}
+
 /// Settle imported paint colours before the document is first shown. Other bindings can affect
 /// layout or component structure, which must be resolved through the normal edit pipeline.
 pub(crate) fn apply_paint_bindings_on_load(doc: &mut Document) {
@@ -930,6 +1115,8 @@ pub(crate) fn apply_paint_bindings_on_load(doc: &mut Document) {
     doc.mark_dirty(pending);
 }
 
+/// Re-apply the variable bindings whose field passes `include`, on the `only` nodes (every bound
+/// node when `None`). Auto layout fields wait while their node has no auto layout.
 fn apply_bindings_matching(doc: &mut Document, only: Option<&std::collections::BTreeSet<NodeId>>, include: impl Fn(&str) -> bool) {
     use super::lists::{BoundList, list_binding};
     if doc.variables.variables.is_empty() {
@@ -944,6 +1131,7 @@ fn apply_bindings_matching(doc: &mut Document, only: Option<&std::collections::B
         let modes = doc.modes_for(id);
         let Some(n) = doc.node(id) else { continue };
         let binds = n.bound.clone();
+        let has_layout = n.layout.is_some();
         let mut sets = serde_json::Map::new();
         let mut effect_sets: Vec<(usize, String, VariableValue)> = Vec::new();
         let mut paint_sets: Vec<(bool, usize, Option<usize>, Color)> = Vec::new();
@@ -951,6 +1139,10 @@ fn apply_bindings_matching(doc: &mut Document, only: Option<&std::collections::B
         let mut prop_sets: Vec<(String, VariableValue)> = Vec::new();
         for (field, var) in binds {
             if !include(&field) {
+                continue;
+            }
+            // A binding never creates an auto layout: without one it waits for the next.
+            if !has_layout && super::props::LAYOUT_KEYS.contains(&field.as_str()) {
                 continue;
             }
             let Some(val) = doc.variables.resolve(&var, &modes) else { continue };
@@ -1104,7 +1296,6 @@ pub fn document_colors(doc: &Document, page: NodeId) -> Vec<(Color, usize)> {
         stack.extend(n.children.iter().copied());
         for paint in n.fills.iter().chain(n.strokes.iter()).filter(|p| p.visible) {
             if let Some(c) = paint.solid_color() {
-                let c = c.with_alpha(c.a * paint.opacity);
                 counts.entry(c.to_rgba8()).or_insert((c, 0)).1 += 1;
             }
         }

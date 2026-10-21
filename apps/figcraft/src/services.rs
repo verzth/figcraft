@@ -172,10 +172,18 @@ const STATE: &str = "state.json";
 /// The Agent tab's chat history, beside the preferences.
 const AGENT_SESSIONS: &str = "AgentSessions.json";
 
-pub fn save_state(app: &FigApp) {
-    if let Some(dir) = config_dir() {
-        write_prefs(&dir, &app.session.prefs);
+/// Everything quitting keeps, all done when it returns (macOS then ends the process): the
+/// preferences in `dir`, this run's recovery copies ([`Recovery::quit`](crate::recovery::Recovery::quit))
+/// and the live sessions' ends (one this app hosts tells everyone and stops; a joined one leaves).
+pub fn shutdown(app: &mut FigApp, dir: Option<&Path>, recovery: Option<crate::recovery::Recovery>) {
+    if let Some(dir) = dir {
+        write_prefs(dir, &app.session.prefs);
     }
+    // Before the sessions end: a recovered online file's copy waits for its session's outcome.
+    if let Some(r) = recovery {
+        r.quit(&app.session, app.ui.quit);
+    }
+    drop(std::mem::take(&mut app.session.live));
 }
 
 /// Write `prefs` to `dir` atomically (a temporary file renamed over the old one: a crash leaves

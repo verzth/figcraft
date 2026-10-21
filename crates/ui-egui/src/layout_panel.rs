@@ -29,8 +29,8 @@ pub fn layout_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[Node
     let al = common(doc, sel, |n| n.layout.clone());
     let has_al = matches!(al, Some(Some(_)));
     let title = if has_al { tr("Auto layout") } else { tr("Layout") };
-    // An instance's auto layout is its main's (only padding, gap and alignment are its own), and
-    // the layers inside it keep their main's size.
+    // An instance's auto layout is its main's (only padding, gap and alignment are its own); the
+    // layers inside it override their size and resizing, not their place in the layout.
     let in_instance = sel.iter().any(|i| figcraft_engine::components::owning_instance(doc, *i).is_some());
     let nested = sel.iter().any(|i| figcraft_engine::components::inside_instance(doc, *i));
     let btns: Vec<(Icon, &str)> = if in_instance {
@@ -49,7 +49,7 @@ pub fn layout_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[Node
     if let Some(Some(l)) = &al {
         ui.add_enabled_ui(!in_instance, |ui| direction(app, ui, &ids, l)).response.on_disabled_hover_text(from_main);
     }
-    ui.add_enabled_ui(!nested, |ui| dimensions(app, ui, doc, sel, has_al)).response.on_disabled_hover_text(from_main);
+    dimensions(app, ui, doc, sel, has_al, nested, from_main);
     if let Some(Some(l)) = &al {
         alignment(app, ui, &ids, l);
         spacing(app, ui, &ids, l);
@@ -62,6 +62,7 @@ pub fn layout_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[Node
         .response
         .on_disabled_hover_text(from_main);
     }
+    crate::selection_spacing::panel(app, ui, sel);
     let grid_parent = sel.iter().all(|i| parent_of(doc, *i).and_then(|p| p.layout.as_ref()).is_some_and(|l| l.mode == LayoutMode::Grid));
     if grid_parent && common(doc, sel, |n| n.child_layout.absolute) == Some(false) {
         ui.add_enabled_ui(!nested, |ui| grid_cell(app, ui, doc, sel)).response.on_disabled_hover_text(from_main);
@@ -146,7 +147,8 @@ fn limit(n: &Node, horizontal: bool, is_min: bool) -> Option<f64> {
     }
 }
 
-fn dimensions(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], has_al: bool) {
+/// `nested`: layers inside an instance, whose proportion lock is their main's (`from_main` says so).
+fn dimensions(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], has_al: bool, nested: bool, from_main: &str) {
     let ids = sel.to_vec();
     let w_of = |n: &Node| (n.width * 100.0).round() / 100.0;
     let h_of = |n: &Node| (n.height * 100.0).round() / 100.0;
@@ -159,7 +161,13 @@ fn dimensions(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId], has
         let e = crate::variable_ui::number_field_mixed(app, ui, &ids, "height", Id::new("lay_h"), Lead::Text("H"), h, "", col);
         app.field_of(&ids, "height", e, h_of, |v| json!(v.max(0.0)));
         let locked = common(doc, sel, |n| n.constrain_proportions).unwrap_or(false);
-        if icons::button(ui, if locked { Icon::LinkOn } else { Icon::LinkOff }, 24.0, locked, tr("Constrain proportions")).clicked() {
+        let link = ui
+            .add_enabled_ui(!nested, |ui| {
+                icons::button(ui, if locked { Icon::LinkOn } else { Icon::LinkOff }, 24.0, locked, tr("Constrain proportions"))
+            })
+            .inner
+            .on_disabled_hover_text(from_main);
+        if link.clicked() {
             app.set_props(&ids, json!({"constrainProportions": !locked}));
         }
     });
@@ -393,35 +401,66 @@ fn alignment(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], l: &AutoLayout) {
     }
 }
 
+/// The Spacing row: the H/V padding pair, or, with Individual padding on, two rows of one field
+/// per side (like Individual corners).
 fn spacing(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], l: &AutoLayout) {
     let col = widgets::col_width(ui.available_width());
     let [pt, pr, pb, pl] = l.padding;
-    row(ui, 32.0, |ui| {
-        let e = crate::variable_ui::number_field(
-            app,
-            ui,
-            ids,
-            "paddingHorizontal",
-            Id::new("al_padh"),
-            Lead::Icon(Icon::PaddingH, tr("Horizontal padding")),
-            (pl == pr).then_some(pl),
-            "",
-            col,
-        );
-        app.field(ids, "paddingHorizontal", e, |v| json!(v.max(0.0)));
-        let e = crate::variable_ui::number_field(
-            app,
-            ui,
-            ids,
-            "paddingVertical",
-            Id::new("al_padv"),
-            Lead::Icon(Icon::PaddingV, tr("Vertical padding")),
-            (pt == pb).then_some(pt),
-            "",
-            col,
-        );
-        app.field(ids, "paddingVertical", e, |v| json!(v.max(0.0)));
-    });
+    let open = ui.data(|d| d.get_temp::<bool>(Id::new("indep_padding"))).unwrap_or(false);
+    let toggle = |ui: &mut Ui| {
+        if icons::button(ui, Icon::IndependentPadding, 24.0, open, tr("Individual padding")).clicked() {
+            ui.data_mut(|d| d.insert_temp(Id::new("indep_padding"), !open));
+        }
+    };
+    if open {
+        // `l` is the selection's common layout, so its sides are common too. `k` indexes
+        // [top, right, bottom, left].
+        let sides = [
+            ("paddingLeft", tr("Left padding"), Icon::PaddingLeft, pl, 3),
+            ("paddingTop", tr("Top padding"), Icon::PaddingTop, pt, 0),
+            ("paddingRight", tr("Right padding"), Icon::PaddingRight, pr, 1),
+            ("paddingBottom", tr("Bottom padding"), Icon::PaddingBottom, pb, 2),
+        ];
+        for (r, pair) in sides.chunks(2).enumerate() {
+            row(ui, 32.0, |ui| {
+                for (key, name, icon, v, k) in pair {
+                    let e = crate::variable_ui::number_field(app, ui, ids, key, Id::new(("padding", *k)), Lead::Icon(*icon, name), Some(*v), "", col);
+                    app.field(ids, key, e, |v| json!(v.max(0.0)));
+                }
+                if r == 0 {
+                    toggle(ui);
+                }
+            });
+        }
+    } else {
+        row(ui, 32.0, |ui| {
+            let e = crate::variable_ui::number_field(
+                app,
+                ui,
+                ids,
+                "paddingHorizontal",
+                Id::new("al_padh"),
+                Lead::Icon(Icon::PaddingH, tr("Horizontal padding")),
+                (pl == pr).then_some(pl),
+                "",
+                col,
+            );
+            app.field(ids, "paddingHorizontal", e, |v| json!(v.max(0.0)));
+            let e = crate::variable_ui::number_field(
+                app,
+                ui,
+                ids,
+                "paddingVertical",
+                Id::new("al_padv"),
+                Lead::Icon(Icon::PaddingV, tr("Vertical padding")),
+                (pt == pb).then_some(pt),
+                "",
+                col,
+            );
+            app.field(ids, "paddingVertical", e, |v| json!(v.max(0.0)));
+            toggle(ui);
+        });
+    }
     if l.mode != LayoutMode::Grid && l.wrap {
         // Wrapped rows (horizontal) or columns (vertical): the gap between them.
         let vertical = l.mode == LayoutMode::Vertical;

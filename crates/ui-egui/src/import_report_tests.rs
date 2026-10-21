@@ -108,7 +108,7 @@ fn escape_closes_the_import_report_like_other_simple_dialogs() {
     assert!(u.app.ui.import_report.is_none(), "Escape closes the report");
 }
 
-fn shown_texts(shapes: Vec<egui::epaint::ClippedShape>) -> Vec<String> {
+pub(crate) fn shown_texts(shapes: Vec<egui::epaint::ClippedShape>) -> Vec<String> {
     fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
         match shape {
             egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
@@ -177,6 +177,7 @@ fn a_dropped_file_shows_its_report_once_it_opens() {
         params: json!({"path": path.to_string_lossy()}),
         command: "file.open",
         target: None,
+        read: None,
     });
     for _ in 0..6 {
         u.frame(vec![]);

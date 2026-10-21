@@ -70,6 +70,44 @@ fn the_scan_reads_names_like_a_whole_file_read() {
     }
 }
 
+#[test]
+fn macos_font_assets_are_found_in_the_asset_store() {
+    // A store laid out like macOS's: fonts downloaded on demand sit in `<id>.asset/AssetData`
+    // folders under `com_apple_MobileAsset_Font*`; other assets are never walked. Untested on a Mac.
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let tmp = TempDir(std::env::temp_dir().join(format!("figcraft-font-assets-{}", std::process::id())));
+    let store = tmp.0.join("AssetsV2");
+    let fonts = store.join("com_apple_MobileAsset_Font7");
+    let data = |kind: &std::path::Path| kind.join("0f1e2d.asset").join("AssetData");
+    for dir in [data(&fonts), data(&store.join("com_apple_MobileAsset_VoiceServices"))] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    // A file under a font-like name is listed but walks to nothing.
+    std::fs::write(store.join("com_apple_MobileAsset_Font7.plist"), b"not a folder").unwrap();
+    let found = font_asset_dirs(&store);
+    assert!(found.contains(&fonts) && !found.iter().any(|d| d.ends_with("com_apple_MobileAsset_VoiceServices")), "{found:?}");
+    assert!(font_asset_dirs(&tmp.0.join("missing")).is_empty());
+    // With an installed font to copy in (none on CI), the scan finds it only in the font folder.
+    let installed = system_font_dirs()
+        .into_iter()
+        .find_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "ttf")));
+    let Some(font) = installed else { return };
+    for kind in ["com_apple_MobileAsset_Font7", "com_apple_MobileAsset_VoiceServices"] {
+        std::fs::copy(&font, data(&store.join(kind)).join("Font.ttf")).unwrap();
+    }
+    let mut pending = BTreeMap::new();
+    for dir in found {
+        scan_dir(&dir, 0, &mut pending);
+    }
+    let paths: Vec<_> = pending.values().flat_map(|(_, p)| p.iter().map(|p| p.path.clone())).collect();
+    assert!(!paths.is_empty() && paths.iter().all(|p| p.starts_with(&fonts)), "{paths:?}");
+}
+
 #[cfg(unix)]
 #[test]
 fn the_scan_skips_named_pipes() {
@@ -178,4 +216,50 @@ fn user_font_dirs_preserve_non_utf8_paths() {
     let dirs = unix_user_font_dirs(Some(OsString::from_vec(b"/home/\xff".to_vec())), Some(OsString::from_vec(b"/data/\xfe".to_vec())));
     assert_eq!(dirs[0].as_os_str().as_bytes(), b"/home/\xff/.fonts");
     assert_eq!(dirs[1].as_os_str().as_bytes(), b"/data/\xfe/fonts");
+}
+
+/// A rescan offers new families and the styles installed since, and never a file twice.
+#[test]
+fn a_rescan_offers_fonts_installed_since() {
+    let entry = |s: &str| Pending { path: format!("no-such-dir/{s}.ttf").into(), index: 0, style: s.into() };
+    let mut db = pending(&["Regular"]);
+    let found = |fams: &[(&str, &[&str])]| -> BTreeMap<String, (String, Vec<Pending>)> {
+        fams.iter().map(|(f, styles)| (f.to_lowercase(), ((*f).to_string(), styles.iter().map(|s| entry(s)).collect()))).collect()
+    };
+    // A new family is added; a pending one takes the walk's files (a new style); both changed.
+    let r = db.merge_rescan(found(&[("CJK UI", &["Regular", "Bold"]), ("Brand Sans", &["Regular"])]));
+    assert_eq!(r.added, ["Brand Sans"]);
+    assert_eq!(r.changed, ["Brand Sans", "CJK UI"]);
+    assert!(db.has_family("brand sans"));
+    assert_eq!(left(&db), ["Regular", "Bold"]);
+    // A loaded family keeps its faces and gets only the files it hasn't read, once.
+    db.families.insert("brand sans".into(), ("Brand Sans".into(), Vec::new()));
+    db.pending.remove("brand sans");
+    db.loaded_files.insert(("no-such-dir/Regular.ttf".into(), 0));
+    let same = db.merge_rescan(found(&[("Brand Sans", &["Regular"])]));
+    assert_eq!(same, Rescan::default());
+    assert!(!db.pending.contains_key("brand sans"));
+    let bold = db.merge_rescan(found(&[("Brand Sans", &["Regular", "Black"])]));
+    assert_eq!((bold.added.len(), bold.changed), (0, vec!["Brand Sans".to_string()]));
+    let waiting = |db: &FontDb| db.pending.get("brand sans").map(|(_, v)| v.iter().map(|e| e.style.clone()).collect::<Vec<_>>()).unwrap_or_default();
+    assert_eq!(waiting(&db), ["Black"]);
+    assert_eq!(db.merge_rescan(found(&[("Brand Sans", &["Regular", "Black"])])), Rescan::default());
+    assert_eq!(waiting(&db), ["Black"]);
+}
+
+/// Font file bytes add their faces once; junk adds nothing.
+#[test]
+fn font_bytes_load_into_the_db() {
+    assert!(load_font_bytes(b"not a font".to_vec()).is_empty());
+    assert!(load_font_bytes(Vec::new()).is_empty());
+    // With the embedded fonts (absent on CI builds without craft-fonts): a file's family is added,
+    // and loading the same file again returns it without adding its faces twice.
+    if let Some(f) = CRAFT_FONTS.first() {
+        let families = load_font_bytes(f.bytes.to_vec());
+        assert_eq!(families.len(), 1);
+        assert!(families.iter().all(|f| has_family(f)));
+        let faces = db().read().unwrap().face_count();
+        assert_eq!(load_font_bytes(f.bytes.to_vec()), families);
+        assert_eq!(db().read().unwrap().face_count(), faces);
+    }
 }

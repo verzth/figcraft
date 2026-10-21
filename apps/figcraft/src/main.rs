@@ -6,6 +6,12 @@
 //! `--control <port>` (or `FIGCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server:
 //! `{"id":1,"method":"engine.execute","params":{"command":"shape.rectangle","params":{"x":0,"y":0,"width":100,"height":100}}}`
 //! → `{"id":1,"ok":true,"result":{…}}`. Methods: `figcraft_ui_egui::control`.
+//!
+//! `--automation-read-root <dir>` / `--automation-write-root <dir>` (each repeatable) confine the
+//! files the window and the control channel read and write (`figcraft_engine::file_access`); the
+//! app's own folders (settings, recovery copies, installed plugins) and opening the files given on
+//! the command line are not. A root that isn't an existing folder stops the app at startup, and so
+//! does any flag the app doesn't know (a mistyped root flag must not start the app unconfined).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -16,6 +22,8 @@ mod args;
 mod control_server;
 mod gamepad;
 mod graphics;
+#[cfg(target_os = "linux")]
+mod linux_window;
 mod recovery;
 mod services;
 mod startup;
@@ -101,10 +109,13 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
-        with_app(|fig| services::save_state(fig));
-        if let Some(r) = recovery::lock(&self.recovery).take() {
-            r.finish();
-        }
+        // With the app out of reach (busy), its recovery copies stay for the next start.
+        let copies = recovery::lock(&self.recovery).take();
+        with_app(|fig| services::shutdown(fig, services::config_dir().as_deref(), copies));
+        // Everything is kept: end before the windows' teardown, where AppKit's Touch Bar support
+        // throws on the content view AccessKit restores (craft-libs#3, #781).
+        #[cfg(target_os = "macos")]
+        std::process::exit(0);
     }
 }
 
@@ -172,6 +183,23 @@ fn main() -> eframe::Result {
         std::process::exit(mcp_attached(&args[1..]));
     }
     let args = args::parse(&args);
+    if let Some(flag) = args.unknown.first() {
+        eprintln!(
+            "FigCraft: unknown option {flag}\nUsage: figcraft [--control PORT] [--automation-read-root DIR]... [--automation-write-root DIR]... [FILE | figcraft://join?...]..."
+        );
+        std::process::exit(2);
+    }
+    let roots = match (
+        args.read_roots.is_empty() && args.write_roots.is_empty(),
+        figcraft_engine::file_access::Roots::new(&args.read_roots, &args.write_roots),
+    ) {
+        (true, _) => None,
+        (false, Ok(r)) => Some(Arc::new(r)),
+        (false, Err(e)) => {
+            eprintln!("FigCraft: {e}");
+            std::process::exit(2);
+        }
+    };
     let port = args.control.or_else(|| std::env::var("FIGCRAFT_CONTROL_PORT").ok().and_then(|p| p.parse().ok()));
     // System fonts: index them in the background, then wake the UI (an idle window draws no frames)
     // to lay text out again with them.
@@ -196,6 +224,7 @@ fn main() -> eframe::Result {
             log::error!("{f}: {e}");
         }
     }
+    let opened: Vec<u64> = session.docs.iter().map(|d| d.uid).collect();
     // Documents a crashed or killed run left unsaved come back; this run keeps its own copies.
     let recovery_root = services::config_dir().map(|d| d.join("Recovery"));
     // The preferences first: they hold the online files a recovered document may be one of.
@@ -217,10 +246,8 @@ fn main() -> eframe::Result {
     // default, never a build from source unless asked).
     session.live.links = figcraft_collab_net::links::system();
     session.invite_links_startup();
-    // A first run (no settings kept yet, nothing to open) starts on the home screen, with its
-    // tips and templates; later runs start in a new file.
     let first_run = svc.prefs.is_none() && args.join.is_none();
-    if session.docs.is_empty() && !first_run {
+    if session.docs.is_empty() && opens_new_file(first_run, session.prefs.start_on_home, port.is_some()) {
         let _ = session.execute("file.new", &json!({}));
     }
     // The interface language from the first frame on, and for the message when the window can't
@@ -235,7 +262,10 @@ fn main() -> eframe::Result {
     }
     svc.agents = Some(agents);
     let mut fig = FigApp::new(session, Box::new(svc));
+    fig.automation_roots = roots;
     fig.ui.home = false;
+    // Files named on the command line are the user's too: their missing fonts are listed.
+    fig.ui.font_checks = opened;
     fig.note_recovered(recovered.copies);
     if let Some(link) = &args.join {
         figcraft_ui_egui::live::open_invite(&mut fig, link);
@@ -250,21 +280,18 @@ fn main() -> eframe::Result {
         .with_inner_size([1440.0, 900.0])
         .with_min_inner_size([800.0, 500.0])
         .with_drag_and_drop(true);
-    // The tab strip is the title bar: macOS keeps its window buttons inset into it; elsewhere the
-    // window is frameless and FigCraft draws the buttons and resize edges.
-    if cfg!(target_os = "macos") {
-        viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
-        fig.ui.title_bar = figcraft_ui_egui::TitleBar::Inset;
-    } else {
-        viewport = viewport.with_decorations(false);
-        fig.ui.title_bar = figcraft_ui_egui::TitleBar::Custom;
-    }
+    // Start frameless on Linux; the app creator checks the actual display backend
+    // before enabling a client-side frame. Other windows inherit that decision.
+    fig.ui.title_bar = desktop_title_bar();
+    viewport = window_chrome(viewport, fig.ui.title_bar);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
     let mut options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Wgpu, ..Default::default() };
     graphics::configure(&mut options.wgpu_options);
     figcraft_ui_egui::windows::install(fig);
+    #[cfg(target_os = "linux")]
+    let linux_display = linux_window::display_socket();
     // Registered before the event loop starts, so it catches the Finder event that launched the app
     // as well as later ones. Lives until the event loop returns; the app creator only borrows it.
     #[cfg(target_os = "macos")]
@@ -275,6 +302,11 @@ fn main() -> eframe::Result {
         "FigCraft",
         options,
         Box::new(move |_cc| {
+            #[cfg(target_os = "linux")]
+            if linux_window::needs_native_frame(_cc, linux_display) {
+                let _ = with_app(|fig| fig.ui.title_bar = figcraft_ui_egui::TitleBar::Native);
+                _cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+            }
             Ok(Box::new(App {
                 queue,
                 ctx_slot,
@@ -290,4 +322,50 @@ fn main() -> eframe::Result {
         startup::failed(e, port.is_some());
     }
     result
+}
+
+/// With nothing to open, whether the window starts in a new file rather than on the home screen.
+/// A first run (no settings kept yet) shows the home screen's tips and templates, and later runs
+/// start in a new file unless the preference asks for Home, which `--control` overrides: its
+/// callers expect a document to act on.
+fn opens_new_file(first_run: bool, start_on_home: bool, control: bool) -> bool {
+    !first_run && (!start_on_home || control)
+}
+
+fn desktop_title_bar() -> figcraft_ui_egui::TitleBar {
+    use figcraft_ui_egui::TitleBar;
+    if cfg!(target_os = "macos") { TitleBar::Inset } else { TitleBar::Custom }
+}
+
+fn window_chrome(viewport: egui::ViewportBuilder, title_bar: figcraft_ui_egui::TitleBar) -> egui::ViewportBuilder {
+    use figcraft_ui_egui::TitleBar;
+    match title_bar {
+        TitleBar::Inset => viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false),
+        TitleBar::Native => viewport.with_decorations(true),
+        TitleBar::Custom => viewport.with_decorations(false),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_window_tests {
+    #[test]
+    fn linux_starts_with_the_existing_frameless_title_bar() {
+        let bar = super::desktop_title_bar();
+        assert_eq!(bar, figcraft_ui_egui::TitleBar::Custom);
+        let viewport = super::window_chrome(egui::ViewportBuilder::default(), bar);
+        assert_eq!(viewport.decorations, Some(false));
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::opens_new_file;
+
+    #[test]
+    fn the_home_preference_starts_on_home_except_for_control_callers() {
+        assert!(opens_new_file(false, false, false), "a new file by default");
+        assert!(!opens_new_file(false, true, false), "Home when the preference asks");
+        assert!(opens_new_file(false, true, true), "--control still starts with a document");
+        assert!(!opens_new_file(true, false, false), "a first run shows the home screen");
+    }
 }

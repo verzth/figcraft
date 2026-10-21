@@ -14,6 +14,8 @@
 //! with a warning; malformed input never panics.
 
 #[cfg(test)]
+mod auto_layout_sizing_tests;
+#[cfg(test)]
 mod connector_label_tests;
 mod export;
 #[cfg(test)]
@@ -23,6 +25,8 @@ mod interop_tests;
 pub mod kiwi;
 mod map;
 mod network;
+#[cfg(test)]
+mod prop_value_tests;
 #[cfg(test)]
 mod slot_tests;
 #[cfg(test)]

@@ -112,8 +112,26 @@ pub fn record_recent(app: &mut FigApp, key: &str) {
     r.truncate(figcraft_engine::MAX_RECENT_ACTIONS);
 }
 
+/// Run a menu, shortcut or palette action by id: actions that need the UI (dialogs, panels, the
+/// clipboard) are handled here, the rest go to the engine.
 pub fn invoke(app: &mut FigApp, id: &str) {
     match id {
+        // Edit ▸ Delete (and the Delete binding) with an interaction open in the Prototype tab
+        // removes that interaction, not the layer (#767).
+        "edit.delete" if app.ui_context.clone().is_some_and(|ctx| crate::proto_panel::delete_selected_interaction(app, &ctx)) => {}
+        // After a click in the Pages list, while the list is on screen and its file open, with no
+        // layers selected, it deletes the current page (#859).
+        "edit.delete" if crate::layers::pages_have_keyboard(app) && app.session.selection().is_empty() => {
+            if let Ok(page) = app.session.page() {
+                crate::layers::delete_page(app, page);
+            }
+        }
+        // Otherwise the list gives up the keyboard: once Delete has taken layers selected since the
+        // click (Select all, say), a second Delete must not take the page.
+        "edit.delete" if app.ui.pages_focus.is_some() => {
+            app.ui.pages_focus = None;
+            app.run(id, json!({}));
+        }
         "file.open" => app.open_dialog(),
         "plugin.import" => crate::plugins_ui::import_dialog(app),
         "file.import" => app.import_dialog(false),
@@ -203,12 +221,13 @@ pub fn invoke(app: &mut FigApp, id: &str) {
         "collab.publish" => crate::live::open_publish(app),
         "edit.copy" | "edit.cut" => {
             let ids = app.session.selection();
-            // SVG for other apps, taken before a cut removes the layers.
-            let svg = app.session.doc().ok().and_then(|d| figcraft_svg_export(d, &ids));
+            // For other apps: text layers' text, other layers as SVG; taken before a cut removes them.
+            let doc = app.session.doc().ok();
+            let mirror = doc.and_then(|d| text_layers_text(d, &ids).or_else(|| figcraft_svg_export(d, &ids)));
             app.run(id, json!({}));
-            // Mirror to the system clipboard (SVG text, else a marker) and remember it, so a later
-            // paste knows whether the clipboard still holds our layers.
-            let text = svg.unwrap_or_else(|| format!("figcraft://clipboard/{}", ids.len()));
+            // Mirror to the system clipboard (text or SVG, else a marker) and remember it, so a
+            // later paste knows whether the clipboard still holds our layers.
+            let text = mirror.unwrap_or_else(|| format!("figcraft://clipboard/{}", ids.len()));
             app.services.clipboard_set_text(&text);
             app.ui.last_copy = Some(text);
         }
@@ -236,6 +255,14 @@ fn export_frames_pdf(app: &mut FigApp) {
     });
 }
 
+/// The text of a selection made only of text layers, one layer per line (None for any other
+/// selection, or when there is no text).
+fn text_layers_text(doc: &figcraft_doc::Document, ids: &[figcraft_doc::NodeId]) -> Option<String> {
+    let texts: Option<Vec<&str>> = ids.iter().map(|i| doc.node(*i).and_then(|n| n.kind.text()).map(|t| t.characters.as_str())).collect();
+    texts.map(|t| t.join("\n")).filter(|t| !t.is_empty())
+}
+
+/// The layers as SVG text for other apps (None when the export fails).
 fn figcraft_svg_export(doc: &figcraft_doc::Document, ids: &[figcraft_doc::NodeId]) -> Option<String> {
     let bytes = figcraft_engine::cmd::file::export_bytes(doc, ids, figcraft_doc::ExportFormat::Svg, 1.0).ok()?;
     String::from_utf8(bytes).ok()
@@ -284,7 +311,7 @@ fn menu_level(app: &mut FigApp, ui: &mut Ui, prefix: &str) -> bool {
                 subs.push(sub.clone());
                 last_sep = false;
                 let full = format!("{prefix}/{sub}");
-                if submenu(ui, prefix, &full, tr(&sub), &t, |ui| menu_level(app, ui, &full).then_some(())).is_some() {
+                if submenu(ui, &full, tr(&sub), &t, |ui| menu_level(app, ui, &full).then_some(())).is_some() {
                     return true;
                 }
             }
@@ -300,10 +327,10 @@ fn menu_level(app: &mut FigApp, ui: &mut Ui, prefix: &str) -> bool {
 /// File ▸ Open recent: the recent files (greyed when the file is gone) and Clear recent. `key` is
 /// the menu's English label, `label` the one shown. Returns whether an item ran.
 fn recent_menu(app: &mut FigApp, ui: &mut Ui, prefix: &str, key: &str, label: &str, t: &Tokens) -> bool {
-    let picked = submenu(ui, prefix, &format!("{prefix}/{key}"), label, t, |ui| {
-        let recents = &app.session.prefs.recent_files;
+    let picked = submenu(ui, &format!("{prefix}/{key}"), label, t, |ui| {
+        let recents: Vec<&String> = crate::home_recents::listed(&app.session.prefs.recent_files).collect();
         let mut picked = None;
-        for p in recents.iter() {
+        for p in recents.iter().copied() {
             let path = std::path::Path::new(p);
             let name = path.file_name().map_or_else(|| p.clone(), |f| f.to_string_lossy().into_owned());
             let exists = path.exists();
@@ -327,20 +354,285 @@ fn recent_menu(app: &mut FigApp, ui: &mut Ui, prefix: &str, key: &str, label: &s
     true
 }
 
-/// A submenu row `label` in the menu at `prefix`; while it's open (hovered last), `add` draws its
-/// items beside it. `key` is unique among the menu's submenus. Returns what `add` returned.
-pub(crate) fn submenu<R>(ui: &mut Ui, prefix: &str, key: &str, label: &str, t: &Tokens, add: impl FnOnce(&mut Ui) -> Option<R>) -> Option<R> {
-    let resp = submenu_item(ui, label, t);
-    let slot = Id::new(("submenu_open", prefix));
-    if resp.hovered() || resp.has_focus() {
-        ui.data_mut(|d| d.insert_temp(slot, key.to_string()));
+/// A submenu row `label` in the menu being drawn; while it's open, `add` draws its items beside
+/// it. `key` names the submenu (its menu path, unique in its menu tree). Returns what `add`
+/// returned.
+pub(crate) fn submenu<R>(ui: &mut Ui, key: &str, label: &str, t: &Tokens, add: impl FnOnce(&mut Ui) -> Option<R>) -> Option<R> {
+    submenu_at(ui, Id::new(("submenu", key)), key, label, 4.0, false, t, add)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Which submenu is open: hover intent with a safe triangle.
+//
+// Every menu tree (the main menu, the context menu) keeps, per level, which of its submenus is
+// open. Hovering another row closes the open submenu at once; resting on a submenu row for
+// `HOVER_DELAY` opens it (sweeping across rows doesn't flash every submenu on the way). Except while the
+// pointer is on its way from the open submenu's row to the submenu: while each move lands inside
+// the triangle between where it was and the submenu's near edge (it keeps getting nearer), rows
+// it crosses don't take over and the submenu's row stays highlighted. Resting (`AIM_REST`) or
+// turning away ends that, and the row under the pointer takes over. Leaving the menus keeps the
+// last submenu open.
+// Closing a menu tree forgets all of it, so it reopens with no submenu open.
+
+/// How long the pointer stays on a submenu row before its submenu opens.
+pub(crate) const HOVER_DELAY: f64 = 0.15;
+/// How long the pointer may rest inside the safe triangle before the row under it takes over.
+pub(crate) const AIM_REST: f64 = 0.3;
+/// A pointer that moved less than this is resting.
+const AIM_STILL: f32 = 1.0;
+/// The triangle reaches this far above and below the submenu.
+const AIM_EDGE_SLOP: f32 = 8.0;
+
+/// The hover state of one menu level.
+#[derive(Clone, Default, Debug)]
+struct Level {
+    /// The open submenu's key.
+    open: Option<String>,
+    /// The open submenu's row and where its panel was drawn (last frame).
+    row: Option<Rect>,
+    panel: Option<Rect>,
+    /// The pointer's last position counted as heading for the panel, and when it got there.
+    apex: Option<egui::Pos2>,
+    moved_at: f64,
+    /// This pass's verdict: the pointer is aiming at the panel.
+    pass: Option<u64>,
+    aiming: bool,
+    /// The row the pointer is on, waiting to take over (a submenu's key, or `None`: a plain row),
+    /// and since when; whether a row asked this pass (unasked, it lapses).
+    pending: Option<(Option<String>, f64)>,
+    asked: bool,
+    /// When the pointer came to rest in the triangle, if that's what ended aiming this pass.
+    rested_at: Option<f64>,
+}
+
+/// One menu tree's levels, by menu path ("" for the top).
+#[derive(Clone, Default, Debug)]
+struct Tree {
+    levels: std::collections::HashMap<String, Level>,
+}
+
+/// The menu level a menu frame's ui draws: its tree's root and its path.
+#[derive(Clone, Debug)]
+struct At {
+    root: Id,
+    path: String,
+}
+
+fn at_key(ui: &Ui) -> Id {
+    ui.id().with("menu_level")
+}
+
+fn level_at(ui: &Ui) -> At {
+    ui.data(|d| d.get_temp::<At>(at_key(ui))).unwrap_or(At { root: Id::new("menus"), path: String::new() })
+}
+
+fn with_level<R>(ctx: &egui::Context, at: &At, f: impl FnOnce(&mut Level) -> R) -> R {
+    ctx.data_mut(|d| f(d.get_temp_mut_or_default::<Tree>(at.root).levels.entry(at.path.clone()).or_default()))
+}
+
+/// Forget everything a menu tree remembers (it closed or opened anew).
+pub(crate) fn forget_tree(ctx: &egui::Context, root: Id) {
+    ctx.data_mut(|d| d.remove::<Tree>(root));
+}
+
+/// Open (`Some(key)`) or close (`None`) a submenu of `root`'s level `path`; the levels below the
+/// one it replaces are forgotten (they reopen closed).
+fn set_open(ctx: &egui::Context, root: Id, path: &str, key: Option<&str>) {
+    ctx.data_mut(|d| {
+        let tree = d.get_temp_mut_or_default::<Tree>(root);
+        let level = tree.levels.entry(path.to_string()).or_default();
+        if level.open.as_deref() == key {
+            return;
+        }
+        let old = std::mem::replace(&mut level.open, key.map(str::to_string));
+        level.row = None;
+        level.panel = None;
+        level.apex = None;
+        level.pending = None;
+        if let Some(old) = old {
+            let below = format!("{old}/");
+            tree.levels.retain(|p, _| *p != old && !p.starts_with(&below));
+        }
+    });
+}
+
+/// Whether `p` is in the triangle `a`, `b`, `c` (either winding, edges included).
+pub(crate) fn in_triangle(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2, c: egui::Pos2) -> bool {
+    let side = |u: egui::Pos2, v: egui::Pos2| (v.x - u.x) * (p.y - u.y) - (v.y - u.y) * (p.x - u.x);
+    let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
+    let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(neg && pos)
+}
+
+/// Whether a pointer that moved from `from` to `p` is heading for `panel`: `p` is inside the
+/// triangle from `from` to the panel's near edge, so it got nearer the panel without leaving the
+/// rows' way to it. Straight up or down (or away) isn't.
+pub(crate) fn heading_for(from: egui::Pos2, p: egui::Pos2, panel: Rect) -> bool {
+    if ![from.x, from.y, p.x, p.y].iter().all(|v| v.is_finite()) {
+        return false;
     }
-    let open: Option<String> = ui.data(|d| d.get_temp(slot));
-    if open.as_deref() != Some(key) {
+    let edge = if panel.min.x >= from.x {
+        panel.min.x
+    } else if panel.max.x <= from.x {
+        panel.max.x
+    } else {
+        return false;
+    };
+    in_triangle(p, from, pos2(edge, panel.min.y - AIM_EDGE_SLOP), pos2(edge, panel.max.y + AIM_EDGE_SLOP))
+}
+
+/// Whether the pointer is on its way to this level's open submenu (rows it crosses don't take
+/// over). Worked out once per pass per level.
+fn aiming(ui: &Ui) -> bool {
+    let at = level_at(ui);
+    let ctx = ui.ctx();
+    let pass = ctx.cumulative_pass_nr();
+    let (p, now) = ctx.input(|i| (i.pointer.hover_pos(), i.time));
+    let (aiming, wait) = with_level(ctx, &at, |l| {
+        if l.pass == Some(pass) {
+            return (l.aiming, None);
+        }
+        l.pass = Some(pass);
+        l.aiming = false;
+        l.rested_at = None;
+        if !l.asked {
+            l.pending = None;
+        }
+        l.asked = false;
+        let (Some(p), Some(_), Some(panel)) = (p, l.open.as_ref(), l.panel) else {
+            l.apex = None;
+            return (false, None);
+        };
+        if panel.contains(p) {
+            l.apex = None;
+            return (false, None);
+        }
+        // On the row (its bottom edge is the next row's).
+        if l.row.is_some_and(|r| (r.min.x..r.max.x).contains(&p.x) && (r.min.y..r.max.y).contains(&p.y)) {
+            l.apex = Some(p);
+            l.moved_at = now;
+            return (false, None);
+        }
+        let Some(from) = l.apex else { return (false, None) };
+        if (p - from).length() <= AIM_STILL {
+            // Resting: the submenu holds a moment longer.
+            if !(0.0..AIM_REST).contains(&(now - l.moved_at)) {
+                l.apex = None;
+                // It has rested long enough: the row under it needn't wait again.
+                l.rested_at = Some(l.moved_at);
+                return (false, None);
+            }
+        } else if heading_for(from, p, panel) {
+            l.apex = Some(p);
+            l.moved_at = now;
+        } else {
+            l.apex = None;
+            return (false, None);
+        }
+        l.aiming = true;
+        (true, Some(AIM_REST - (now - l.moved_at)))
+    });
+    // Wake up when the rest runs out, so the row under a still pointer takes over.
+    if let Some(w) = wait.filter(|w| w.is_finite() && *w > 0.0) {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(w));
+    }
+    aiming
+}
+
+/// The pointer is on a row of level `at` (`target`: the row's submenu, or `None` for a plain
+/// row): another open submenu closes at once, and `target` opens once the pointer has stayed
+/// there `HOVER_DELAY`.
+fn hover_request(ctx: &egui::Context, at: &At, target: Option<&str>) {
+    let now = ctx.input(|i| i.time);
+    if with_level(ctx, at, |l| l.open.is_some() && l.open.as_deref() != target) {
+        set_open(ctx, at.root, &at.path, None);
+    }
+    let left = with_level(ctx, at, |l| {
+        l.asked = true;
+        if l.open.as_deref() == target {
+            l.pending = None;
+            return None;
+        }
+        let since = match &l.pending {
+            Some((t, since)) if t.as_deref() == target => *since,
+            _ => {
+                let since = l.rested_at.unwrap_or(now);
+                l.pending = Some((target.map(str::to_string), since));
+                since
+            }
+        };
+        Some(HOVER_DELAY - (now - since))
+    });
+    match left {
+        Some(left) if left <= 0.0 => set_open(ctx, at.root, &at.path, target),
+        // Wake up when it's due, so a still pointer gets there.
+        Some(left) => ctx.request_repaint_after(std::time::Duration::from_secs_f64(left.min(HOVER_DELAY))),
+        None => {}
+    }
+}
+
+/// Whether the pointer is on a row of level `at` other than the open submenu's (it shows as
+/// hovered instead).
+fn pending_elsewhere(ctx: &egui::Context, at: &At) -> bool {
+    with_level(ctx, at, |l| l.pending.as_ref().is_some_and(|(t, _)| *t != l.open))
+}
+
+/// A plain row of the level being drawn: hovering it (not while aiming at a submenu) closes the
+/// level's open submenu. Returns whether it shows as hovered.
+fn plain_row_hover(ui: &Ui, resp: &egui::Response) -> bool {
+    let hovered = resp.hovered() && !aiming(ui);
+    if hovered {
+        hover_request(ui.ctx(), &level_at(ui), None);
+    }
+    hovered || resp.has_focus()
+}
+
+/// A submenu row whose panel (area `area`, `gap` right of the row) shows while it's open.
+#[allow(clippy::too_many_arguments)]
+fn submenu_at<R>(
+    ui: &mut Ui,
+    area: Id,
+    key: &str,
+    label: &str,
+    gap: f32,
+    constrain: bool,
+    t: &Tokens,
+    add: impl FnOnce(&mut Ui) -> Option<R>,
+) -> Option<R> {
+    let at = level_at(ui);
+    let aim = aiming(ui);
+    let w = ui.available_width();
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
+    // The keyboard and clicks open it at once; hovering after a moment.
+    if resp.has_focus() || resp.clicked() {
+        set_open(ui.ctx(), at.root, &at.path, Some(key));
+    } else if resp.hovered() && !aim {
+        hover_request(ui.ctx(), &at, Some(key));
+    }
+    let open = with_level(ui.ctx(), &at, |l| {
+        let open = l.open.as_deref() == Some(key);
+        if open {
+            l.row = Some(r);
+        }
+        open
+    });
+    a11y::submenu(&resp, label, open);
+    a11y::own_focus(&resp);
+    // The open submenu's row stays highlighted while the pointer is in the submenu (not while it
+    // rests on another row of this menu).
+    let keep = open && !pending_elsewhere(ui.ctx(), &at);
+    paint_submenu_row(ui, r, label, keep || (resp.hovered() && !aim) || resp.has_focus(), t);
+    if !open {
         return None;
     }
-    let pos = pos2(resp.rect.max.x + 4.0, resp.rect.min.y - 8.0);
-    egui::Area::new(Id::new(("submenu", key))).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| menu_frame(ui, t, add)).inner
+    let pos = pos2(r.max.x + gap, r.min.y - 8.0);
+    let child = At { root: at.root, path: key.to_string() };
+    let shown =
+        egui::Area::new(area).fixed_pos(pos).order(egui::Order::Foreground).constrain(constrain).show(ui.ctx(), |ui| menu_frame(ui, t, child, add));
+    let panel = shown.response.rect;
+    with_level(ui.ctx(), &at, |l| l.panel = Some(panel));
+    shown.inner
 }
 
 /// A thin line between groups of menu items.
@@ -351,7 +643,8 @@ pub(crate) fn separator(ui: &mut Ui) {
     ui.add_space(4.0);
 }
 
-fn menu_frame<R>(ui: &mut Ui, t: &Tokens, add: impl FnOnce(&mut Ui) -> R) -> R {
+/// A menu panel drawing menu level `at`.
+fn menu_frame<R>(ui: &mut Ui, t: &Tokens, at: At, add: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::NONE
         .fill(t.menu)
         .corner_radius(CornerRadius::same(13))
@@ -362,6 +655,8 @@ fn menu_frame<R>(ui: &mut Ui, t: &Tokens, add: impl FnOnce(&mut Ui) -> R) -> R {
             let w = ui.data(|d| d.get_temp::<f32>(width_key(ui))).unwrap_or(0.0).max(MENU_W);
             ui.set_width(w);
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            let key = at_key(ui);
+            ui.data_mut(|d| d.insert_temp(key, at));
             add(ui)
         })
         .inner
@@ -398,7 +693,7 @@ fn indented_item(ui: &mut Ui, label: &str, shortcut: &str, enabled: bool, checke
     }
     // The keyboard's item is highlighted like the hovered one.
     a11y::own_focus(&resp);
-    let hov = (resp.hovered() || resp.has_focus()) && enabled;
+    let hov = plain_row_hover(ui, &resp) && enabled;
     if hov {
         ui.painter().rect_filled(r, CornerRadius::same(5), t.menu_hover);
     }
@@ -418,24 +713,24 @@ fn indented_item(ui: &mut Ui, label: &str, shortcut: &str, enabled: bool, checke
     resp.clicked()
 }
 
-fn submenu_item(ui: &mut Ui, label: &str, t: &Tokens) -> egui::Response {
-    let w = ui.available_width();
-    let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
-    a11y::submenu(&resp, label);
-    a11y::own_focus(&resp);
-    if resp.hovered() || resp.has_focus() {
+fn paint_submenu_row(ui: &mut Ui, r: Rect, label: &str, highlight: bool, t: &Tokens) {
+    if highlight {
         ui.painter().rect_filled(r, CornerRadius::same(5), t.menu_hover);
     }
     let galley = ui.painter().layout_no_wrap(label.to_string(), regular(12.0), t.menu_text);
     need_width(ui, 28.0 + galley.size().x + 28.0);
     ui.painter().galley(pos2(r.min.x + 28.0, r.center().y - galley.size().y / 2.0), galley, t.menu_text);
     icons::paint(ui.painter(), Rect::from_center_size(pos2(r.max.x - 12.0, r.center().y), vec2(12.0, 12.0)), Icon::ChevronRight, t.menu_text);
-    resp
 }
 
 /// Open the main menu at top-level menu `top` (control channel).
 pub fn open_main_menu(ctx: &egui::Context, top: &str) {
-    ctx.data_mut(|d| d.insert_temp(Id::new("main_open"), top.to_string()));
+    set_open(ctx, main_menu_id(), "", Some(top));
+}
+
+/// The context menu's area (and menu tree).
+fn ctx_menu_id() -> Id {
+    Id::new("ctx_menu")
 }
 
 /// The main menu's area.
@@ -464,13 +759,29 @@ const TOP_MENUS: &[&str] = &[
 
 pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
+    // A closed menu forgets its open submenus (and a context menu opened somewhere else starts
+    // afresh), so neither reopens with a stale submenu showing.
+    if !app.ui.main_menu {
+        forget_tree(ctx, main_menu_id());
+    }
+    let ctx_at = app.ui.context_menu.as_ref().map(|(p, _)| *p);
+    let ctx_seen = Id::new("ctx_menu_at");
+    if ctx.data(|d| d.get_temp::<Option<egui::Pos2>>(ctx_seen)) != Some(ctx_at) {
+        ctx.data_mut(|d| d.insert_temp(ctx_seen, ctx_at));
+        forget_tree(ctx, ctx_menu_id());
+    }
+    // Select layer opened or closed from the control channel.
+    if let Some(open) = ctx.data_mut(|d| d.remove_temp::<bool>(select_layer_ask_id())) {
+        set_open(ctx, ctx_menu_id(), "", open.then_some(SELECT_LAYER));
+    }
     // Main menu.
     if app.ui.main_menu {
         let mut close = false;
         let area = egui::Area::new(main_menu_id()).fixed_pos(pos2(8.0, crate::tabs::HEIGHT + 48.0)).order(egui::Order::Foreground).show(ctx, |ui| {
-            menu_frame(ui, &t, |ui| {
+            menu_frame(ui, &t, At { root: main_menu_id(), path: String::new() }, |ui| {
                 // Quick actions search row.
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+                plain_row_hover(ui, &resp);
                 a11y::menu_item(&resp, tr("Actions…"), crate::shortcuts::shortcut("app.actions").unwrap_or(""), None);
                 ui.painter().rect_filled(r.shrink(2.0), CornerRadius::same(5), Color32::from_white_alpha(18));
                 icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 16.0, r.center().y), vec2(14.0, 14.0)), Icon::Search, t.menu_dim);
@@ -488,20 +799,8 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
                 }
                 ui.add_space(6.0);
                 for top in TOP_MENUS {
-                    let resp = submenu_item(ui, tr(top), &t);
-                    if resp.hovered() || resp.has_focus() {
-                        ui.data_mut(|d| d.insert_temp(Id::new("main_open"), top.to_string()));
-                    }
-                    let open: Option<String> = ui.data(|d| d.get_temp(Id::new("main_open")));
-                    if open.as_deref() == Some(*top) {
-                        let pos = pos2(resp.rect.max.x + 12.0, resp.rect.min.y - 8.0);
-                        egui::Area::new(Id::new(("menu", *top))).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-                            menu_frame(ui, &t, |ui| {
-                                if menu_level(app, ui, top) {
-                                    close = true;
-                                }
-                            });
-                        });
+                    if submenu_at(ui, Id::new(("menu", *top)), top, tr(top), 12.0, false, &t, |ui| menu_level(app, ui, top).then_some(())).is_some() {
+                        close = true;
                     }
                 }
             });
@@ -509,6 +808,7 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
         let clicked_outside = ctx.input(|i| i.pointer.any_pressed()) && !over_menu(ctx) || ctx.input(|i| i.key_pressed(egui::Key::Escape));
         if close || (clicked_outside && !area.response.hovered()) {
             app.ui.main_menu = false;
+            forget_tree(ctx, main_menu_id());
         }
     }
     // Context menu (from the keyboard: at the focused layer row or the canvas selection, taking the
@@ -521,8 +821,8 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
             a11y::popup(&mut app.ui.nav, f, Id::new("ctx_menu"));
         }
         let mut close = false;
-        let area = egui::Area::new(Id::new("ctx_menu")).fixed_pos(pos).order(egui::Order::Foreground).constrain(true).show(ctx, |ui| {
-            menu_frame(ui, &t, |ui| {
+        let area = egui::Area::new(ctx_menu_id()).fixed_pos(pos).order(egui::Order::Foreground).constrain(true).show(ctx, |ui| {
+            menu_frame(ui, &t, At { root: ctx_menu_id(), path: String::new() }, |ui| {
                 if select_layer_menu(app, ui, pos, &t) {
                     close = true;
                 }
@@ -635,20 +935,23 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
         let clicked_outside = ctx.input(|i| i.pointer.any_pressed()) && !area.response.hovered() && !over_menu(ctx);
         if close || clicked_outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             app.ui.context_menu = None;
-            ctx.data_mut(|d| d.remove::<bool>(select_layer_id()));
+            forget_tree(ctx, ctx_menu_id());
         }
     }
     crate::colorpicker::show(app, ctx);
     palette(app, ctx);
 }
 
-fn select_layer_id() -> Id {
-    Id::new("ctx_select_layer_open")
+/// The context menu's Select layer submenu (its key in the context menu's tree).
+const SELECT_LAYER: &str = "Select layer";
+
+fn select_layer_ask_id() -> Id {
+    Id::new("ctx_select_layer_ask")
 }
 
-/// Open (or close) the context menu's Select layer submenu.
+/// Open (or close) the context menu's Select layer submenu (applied when the menu next draws).
 pub fn open_select_layer(ctx: &egui::Context, open: bool) {
-    ctx.data_mut(|d| d.insert_temp(select_layer_id(), open));
+    ctx.data_mut(|d| d.insert_temp(select_layer_ask_id(), open));
 }
 
 /// The context menu's "Select layer" submenu (right-click on the canvas): every layer under the
@@ -672,23 +975,15 @@ fn select_layer_menu(app: &mut FigApp, ui: &mut Ui, pos: egui::Pos2, t: &Tokens)
         return false;
     }
     let sel = ds.selection.clone();
-    let resp = submenu_item(ui, tr("Select layer"), t);
-    if resp.hovered() {
-        ui.data_mut(|d| d.insert_temp(select_layer_id(), true));
-    }
-    let mut picked = None;
-    if ui.data(|d| d.get_temp::<bool>(select_layer_id())).unwrap_or(false) {
-        let at = pos2(resp.rect.max.x + 4.0, resp.rect.min.y - 8.0);
-        egui::Area::new(Id::new("ctx_select_layer")).fixed_pos(at).order(egui::Order::Foreground).constrain(true).show(ui.ctx(), |ui| {
-            menu_frame(ui, t, |ui| {
-                for (id, depth, name) in &layers {
-                    if indented_item(ui, name, "", true, sel.contains(id), 12.0 * (*depth).min(8) as f32, t) {
-                        picked = Some(*id);
-                    }
-                }
-            });
-        });
-    }
+    let picked = submenu_at(ui, Id::new("ctx_select_layer"), SELECT_LAYER, tr("Select layer"), 4.0, true, t, |ui| {
+        let mut picked = None;
+        for (id, depth, name) in &layers {
+            if indented_item(ui, name, "", true, sel.contains(id), 12.0 * (*depth).min(8) as f32, t) {
+                picked = Some(*id);
+            }
+        }
+        picked
+    });
     separator(ui);
     match picked {
         Some(id) => {

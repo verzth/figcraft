@@ -73,6 +73,7 @@ fn registry() -> &'static Registry {
         list.extend(agent::specs());
         list.extend(edit::specs());
         list.extend(lists::specs());
+        list.extend(crate::selection_colors::specs());
         list.extend(arrange::specs());
         list.extend(structure::specs());
         list.extend(section::specs());
@@ -81,6 +82,7 @@ fn registry() -> &'static Registry {
         list.extend(page::specs());
         list.extend(view::specs());
         list.extend(text::specs());
+        list.extend(crate::fonts::specs());
         list.extend(styles::specs());
         list.extend(image::specs());
         list.extend(variables::specs());

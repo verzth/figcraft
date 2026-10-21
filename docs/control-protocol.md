@@ -37,13 +37,15 @@ requests still queued after the UI timeout are discarded, including requests def
 window. A command already running is not interrupted.
 
 A minimised or covered window (the main one or another, see Windows below) draws no frames, but
-still answers `engine.execute`, `engine.commands`, `document.inspect`, `node.get`, `window.list`,
-`ui.render` and `app.hello`, acting on the file that window shows, so an attached agent can edit,
-inspect and save while the app is out of sight. (`app.hello` only records which MCP client is
-connected, so an MCP client's handshake never waits for a window to show.) Screenshots, input
-(`ui.input`, `ui.pointer`, `ui.key`, `ui.type`) and the interface's own state wait for the window
-to show, and time out after 60 s if it doesn't. (`ui.pointer` and `ui.input` positions still move
-the agent cursor while it waits, so it's where the agent last pointed when the window shows again.)
+still answers every method that acts on the app's state (`engine.execute`, `document.inspect`,
+`node.get`, `ui.inspect`, `ui.pointer`, `ui.key`, `ui.type`, `ui.set`, `ui.render`, `window.list`,
+`app.hello`, …), in the file that window shows, so an attached agent can edit, inspect and save
+while the app is out of sight. The app is not drawn meanwhile and only wakes for requests, at most
+ten times a second while minimised, so a request there takes up to about 0.1 s. What only a drawn
+frame can answer (`ui.screenshot`, `ui.input`, `window.new`) is an error at once (`window 0 is
+minimised or hidden: …`) instead of waiting for the window to show; `ui.render` draws the document
+without it. Under Wayland the app can't tell that its window is minimised: where the compositor
+then stops drawing it, a request waits for the window and gets the 60 s timeout error.
 
 Coordinates are page units, y down. `x`/`y` in `node.set`/`node.create` are relative to the parent
 frame (groups have no coordinate space of their own).
@@ -54,6 +56,32 @@ window, with its tabs, panels and canvas: `engine.execute` acts on the file it s
 `ui.screenshot` captures it, `ui.input` reaches it. Without `window`, a request goes to the window
 last in front (the one the user clicked last, or the last `window.new` / `window.focus`). An
 unknown id is an error.
+
+## Confining file access
+
+```sh
+figcraft --control 7979 --automation-read-root /work/project --automation-write-root /work/project/out
+```
+
+`--automation-read-root <dir>` and `--automation-write-root <dir>` (each repeatable, `--flag=<dir>`
+works too; the same flags as `figcraft-cli mcp`) confine the files the app reads and writes for
+whoever asks: every control request (`engine.execute`, `ui.render`, `ui.screenshot`, `window.new`,
+`ui.key`, `ui.menu.invoke`…) and every frame of every window, so input injected with `ui.input`
+and what a person does in the window are held to the same folders. Files are read only inside a
+read or write root and written only inside a write root; anything else is an ordinary error reply
+(`automation path rejected: …`), and recent files outside the roots aren't listed. Paths are
+resolved as `docs/mcp.md` › Confining file access describes. A root that isn't an existing folder
+stops the app before its window opens, and so does any option the app doesn't know (a mistyped
+flag such as `--automation-write-roots` exits with `unknown option`, never starts unconfined).
+Without the flags nothing changes. The flags arrived in FigCraft 0.7.0: 0.6.0 and earlier ignore
+them and confine nothing.
+
+Not confined: opening the files given on the command line when the app starts and the documents
+the system hands over (Finder, Open With; saving them later is confined like any write), and the
+app's own folders (preferences, recovery copies, plugins installed from a plugin directory). Run `figcraft-cli mcp --attach PORT` without the flags against
+such an app (it refuses them: the app does the confining). `ui.screenshot` and `ui.render` without a
+`path` return the PNG as data, which is how the attached MCP server takes them, so it writes no
+temporary files.
 
 ## Methods
 
@@ -111,7 +139,9 @@ component/instance links, overrides, `slot` (a slot layer's property name), boun
 `devStatus` (handoff status), `devChanged` (changed since it was marked ready for dev),
 `annotations` (Dev Mode notes: `[{label, properties, category?}]`), `codeLinks` (a component's
 links to code: `[{language, importPath, name, template}]`), `devResources` (links for developers,
-its own and inherited: `[{name, url, index?, from?}]`). The auto layout props
+its own and inherited: `[{name, url, index?, from?}]`), `pluginData` (layer data written with
+`node.set {props: {pluginData: {key: value}}}`, pages included: `{key: value}`, values as strings;
+only when there is some). The auto layout props
 that `node.set` accepts are listed in [mcp.md](mcp.md#conventions-agents-must-know).
 
 ### `ui.inspect {}`
@@ -152,7 +182,10 @@ instance, a dragged axis slider; see `text.preview` in [mcp.md](mcp.md)).
 `canvas` or `properties`), whether `keyboard` mode is on (F6 or Tab moved the focus since the last
 pointer press, so the focus ring shows) and the name of the `control` with the keyboard (what a
 screen reader announces; empty when nothing has it). `reduceMotion` is true when the preference or
-the system's accessibility setting turns the interface's animations off. `live` is the live
+the system's accessibility setting turns the interface's animations off. `uiScale` is the interface
+size: the `choice` (relative to the system's display scale, `pref.uiScale`), the `zoom` drawn
+(relative too), what that is in physical pixels per point (`drawn`) and whether the window is too
+small for the choice (`limited`, so `zoom` is smaller). `live` is the live
 session of the window's active file as the window shows it (sessions are per file: another tab
 shows its own, or `status: "off"`): `session` (its id, null when the file isn't in one),
 `sessions` (how many the app has running), `status`, `role`, the number of `peers`, who you `follow`, the
@@ -181,8 +214,9 @@ A mouse gesture with the current tool. `kind`: `down`, `move`, `up`, `click`, `d
 (`x`, `y`) or screen pixels (`sx`, `sy`). `pressure` (0–1) is pen pressure (the Pencil records
 it); a drag's pressure goes from `pressure` to `pressureTo`. Returns `{selection, tool}`. With the Move and Scale
 tools, a press on a frame's or section's name label (as the canvas last drew it, along a rotated
-frame's top edge) selects and drags that frame. Every position also moves the **agent cursor** on
-the canvas: the pointer drawn where the agent is, tagged with the connected client's name (as a
+frame's top edge) selects and drags that frame; a double-click there renames the frame in place in
+the desktop app (the name field opens over the label). Every position also moves the **agent cursor**
+on the canvas: the pointer drawn where the agent is, tagged with the connected client's name (as a
 live session shows everyone's cursor), which glides there and fades a couple of seconds after the
 last report.
 
@@ -233,12 +267,13 @@ separate calls. Returns `{queued}`.
 
 Invoke a menu item exactly like clicking it (this may open a dialog). Returns `{ok, lastError}`.
 
-### `ui.set {rightTab?, leftTab?, theme?, home?, homeSection?, homeRecentsView?, homeRecentsSort?, homeRecentsOrder?, palette?, mainMenu?, focusRegion?, colorPicker?, variables?, layerFilter?, collapseLayers?, exportPreview?, preview?, presentScroll?, colorProfileDialog?, stylePicker?, stylePickerEdit?, stylePickerView?, iconGallery?, protoEditor?, contextMenu?, contextSelectLayer?, commentOpen?, commentDraft?, commentFilter?, commentSort?, commentSearch?, commentReply?, commentEdit?, presentComments?, devCompare?, devCompareMode?, devCompareSplit?, annotationFilter?, resetFrameStats?, pluginsWindow?, pluginsTab?, pluginConfirm?, pluginForm?}`
+### `ui.set {rightTab?, leftTab?, theme?, home?, homeSection?, homeSearch?, homeRecentsView?, homeRecentsSort?, homeRecentsOrder?, palette?, mainMenu?, focusRegion?, colorPicker?, variables?, layerFilter?, collapseLayers?, exportPreview?, preview?, presentScroll?, colorProfileDialog?, stylePicker?, stylePickerEdit?, stylePickerView?, iconGallery?, protoEditor?, contextMenu?, contextSelectLayer?, commentOpen?, commentDraft?, commentFilter?, commentSort?, commentSearch?, commentReply?, commentEdit?, presentComments?, devCompare?, devCompareMode?, devCompareSplit?, annotationFilter?, resetFrameStats?, pluginsWindow?, pluginsTab?, pluginConfirm?, pluginForm?}`
 
 Switch panels and modes: `rightTab` `design|prototype|inspect` (the old `agent` value keeps working: the Agent chat now lives in the left panel and opens there), `leftTab` `file|agent|assets`, `theme`,
 `home` (bool), `homeSection` (`recents`, `online` or `templates`: which section the home screen shows, as `ui.inspect` reports it; opening
 `online` asks each server once what became of your online files), `homeRecentsView` (`grid|list`), `homeRecentsSort` (`modified|name|created`) and `homeRecentsOrder` (`desc|asc`): how the home screen shows its recent files (kept in the preferences; `ui.inspect` reports them under `homeRecents` with each file and whether its picture is in), `palette` (bool: the Actions palette), `mainMenu` (bool, or a top-level menu such
-as `"Plugins"` to open the main menu with it open), `pluginsWindow` (bool: Plugins ▸ Manage
+as `"Plugins"` to open the main menu with it open), `homeSearch` (text, at most 256 characters: filters locally known open, recent and online files plus starter templates in Home; an empty string returns to the selected section),
+`pluginsWindow` (bool: Plugins ▸ Manage
 plugins…), `pluginsTab` (`installed|browse`: that window's tab), `pluginConfirm` (a plugin id of the
 directory listed last: its install confirmation shows, as its Install button would; `null` closes
 it), `pluginForm` (`{id, command?}`: start that plugin command like its menu item, opening
@@ -278,15 +313,18 @@ the annotations the canvas shows). `resetFrameStats` (true: start `framesDrawn` 
 `mentions` the picker offers, `devCompare` (`{id, mode, split}` or `null`), `devFocus` (the frame the
 focus view shows, or `null`) and `annotationFilter`).
 
-### `ui.screenshot {path}`
+### `ui.screenshot {path?}`
 
 PNG of the whole window (`window` picks one), UI included (needs a visible window; an idle one draws the frame to
-capture). Returns `{path, width, height}`, or an error after 60 s when the window doesn't deliver.
+capture). Returns `{path, width, height}`, without `path` `{format: "png", width, height, data}`
+(base64); an error at once when the window is minimised or hidden, or after 60 s when the window
+doesn't deliver.
 
-### `ui.render {path, scale?, ids?}`
+### `ui.render {path?, scale?, ids?}`
 
 PNG of the document without UI chrome (works without a window). Without `ids` it exports the
-selection, else the page's top-level layers. Returns the export result.
+selection, else the page's top-level layers. Returns the export result: written to `path`, or
+`{format: "png", data}` (base64) without one.
 
 ### `window.new {path?, index?}`
 

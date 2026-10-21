@@ -61,7 +61,7 @@ impl<'de> Deserialize<'de> for Color {
 }
 
 fn clamp01(v: f32) -> f32 {
-    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+    if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) }
 }
 
 impl Default for Color {

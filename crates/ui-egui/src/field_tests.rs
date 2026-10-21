@@ -473,3 +473,164 @@ fn scrubbing_the_scale_panel_width_scales_live_in_one_undo_step() {
     let (_, _, w, h) = geom(&u, a);
     assert_eq!((w, h, undo_steps(&u)), (60.0, 45.0, steps + 1), "40×30 scaled to a width of 60");
 }
+
+/// The texts painted in the last frame: what they say, whether they end in an ellipsis, and where
+/// they show (within their clip).
+fn painted_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, bool, egui::Rect)> {
+    fn walk(shape: &egui::Shape, clip: egui::Rect, out: &mut Vec<(String, bool, egui::Rect)>) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, clip, out)),
+            egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.galley.elided, t.visual_bounding_rect().intersect(clip))),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    shapes.iter().for_each(|c| walk(&c.shape, c.clip_rect, &mut out));
+    out
+}
+
+/// The glass effect's light intensity field is labelled (#256): drawn in the Design panel with the
+/// effect's settings open.
+#[test]
+fn the_glass_light_intensity_field_has_a_label() {
+    let mut s = Session::new();
+    let r = NodeId(s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 100, "height": 80})).unwrap()["id"].as_u64().unwrap());
+    s.execute("select.set", &json!({"ids": [r]})).unwrap();
+    s.execute("effect.add", &json!({"type": "glass"})).unwrap();
+    let mut u = Ui::new(s);
+    u.ctx.data_mut(|d| d.insert_temp(Id::new(("fx_open", 0usize)), true));
+    u.frame(vec![]);
+    let shapes = u.frame_output(vec![]).shapes;
+    let lead = u.ctx.read_response(Id::new(("fx_gi", 0usize)).with("lead")).expect("the intensity field is shown").rect;
+    let labels: Vec<(String, bool)> =
+        painted_texts(&shapes).into_iter().filter(|(_, _, at)| lead.contains(at.center())).map(|(text, cut, _)| (text, cut)).collect();
+    assert_eq!(labels, [("Intensity".to_string(), false)], "labelled, and not cut short");
+    let field = u.ctx.read_response(Id::new(("fx_gi", 0usize)).with("field")).expect("its value").rect;
+    assert_eq!(field.max.x - lead.min.x, GLASS_FIELD_W, "the width the next test measures against");
+}
+
+/// A glass settings field's width in the Design panel at its default width.
+const GLASS_FIELD_W: f32 = 98.5;
+
+/// The light intensity label this fix adds fits whole beside its value in every language (#256).
+/// Other glass labels may end in "…" in some languages (es "Profundidad"); a longer
+/// "Intensity" translation fails here.
+#[test]
+fn the_intensity_label_fits_whole_in_every_language() {
+    use crate::i18n::{self, Text};
+    let ctx = egui::Context::default();
+    let mut out = ctx.run_ui(Default::default(), |ui| {
+        let width = |s: &str| ui.painter().layout_no_wrap(s.to_string(), crate::theme::regular(11.0), egui::Color32::WHITE).size().x;
+        for lang in i18n::languages() {
+            let label = lang.ui.iter().find(|(k, _)| *k == "Intensity").map_or("Intensity", |(_, t)| match t {
+                Text::Plain(s) | Text::Plural { other: s, .. } => s,
+            });
+            let lead = crate::widgets::text_lead_width(ui, label, GLASS_FIELD_W);
+            assert!(lead >= 12.0 + width(label), "{}: {label:?} would end in \"…\"", lang.code);
+        }
+    });
+    out.textures_delta.clear();
+}
+
+#[test]
+fn a_label_too_long_for_its_field_ends_in_an_ellipsis_before_the_value() {
+    let ctx = egui::Context::default();
+    let mut field = egui::Rect::NOTHING;
+    let mut out = ctx.run_ui(Default::default(), |ui| {
+        let lead = crate::widgets::Lead::Text("A label much wider than its field");
+        let _ = crate::widgets::number_field(ui, Id::new("long"), lead, Some(80.0), "%", 60.0, 1.0);
+        field = ui.min_rect();
+    });
+    out.textures_delta.clear();
+    let texts = painted_texts(&out.shapes);
+    let [(_, label_cut, l), (value, value_cut, v)] = texts.as_slice() else { panic!("the label and the value: {texts:?}") };
+    assert!(*label_cut, "the label ends in an ellipsis");
+    assert_eq!((value.as_str(), *value_cut), ("80%", false), "the value shows whole");
+    assert!(field.contains_rect(*l) && field.contains_rect(*v), "both inside the field {field:?}: {l:?} {v:?}");
+    assert!(l.max.x < v.min.x, "the label stops before the value: {l:?} {v:?}");
+}
+
+/// The middle of the field with response `id`.
+fn at(u: &Ui, id: Id) -> Pos2 {
+    u.ctx.read_response(id.with("field")).unwrap_or_else(|| panic!("no field {id:?}")).rect.center()
+}
+
+/// Type `text` into the field whose response is `id` and press Enter.
+fn type_at(u: &mut Ui, id: Id, text: &str) {
+    let p = at(u, id);
+    click(u, p);
+    u.frame(vec![Event::Text(text.into())]);
+    key(u, Key::Enter, Modifiers::NONE);
+    u.frame(vec![]);
+}
+
+/// A frame with one layout grid, its settings open in the Design panel.
+fn grid_ui(grid: serde_json::Value) -> (Ui, NodeId) {
+    let mut s = Session::new();
+    let f = id(s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 400, "height": 300})).unwrap());
+    s.execute("node.set", &json!({"ids": [f], "props": {"grids": [grid]}})).unwrap();
+    s.execute("select.set", &json!({"ids": [f]})).unwrap();
+    let mut u = Ui::new(s);
+    u.ctx.data_mut(|d| d.insert_temp(Id::new(("grid_open", 0usize)), true));
+    u.frame(vec![]);
+    (u, f)
+}
+
+/// Scroll the Design panel (over its own field `id`) until that field is on the test screen: the
+/// grid settings sit below the fold.
+fn scroll_to(u: &mut Ui, id: Id) {
+    let wheel = Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -300.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: Modifiers::NONE,
+    };
+    for _ in 0..10 {
+        let p = at(u, id);
+        if p.y < 860.0 {
+            break;
+        }
+        u.frame(vec![Event::PointerMoved(pos2(p.x, 500.0)), wheel.clone()]);
+        // Let the scroll settle.
+        for _ in 0..30 {
+            u.frame(vec![]);
+        }
+    }
+}
+
+/// The word for Auto types 0 only where 0 *is* the automatic value: a fixed layout grid's count
+/// does, an auto layout's gap (Auto there is "Space between") does not. Keying it on the field's
+/// placeholder said 0 everywhere, which turned the gap's mode off.
+#[test]
+fn typing_auto_is_zero_only_where_zero_is_the_automatic_value() {
+    let count_id = Id::new(("grid_field", "count", 0usize));
+    let (mut u, f) = grid_ui(json!({"kind": "columns", "align": "min", "count": 3, "size": 8, "gutter": 10}));
+    let count = |u: &Ui| u.app.session.doc().unwrap().node(f).unwrap().grids[0].count;
+    scroll_to(&mut u, count_id);
+    type_at(&mut u, count_id, "Auto");
+    assert_eq!(count(&u), 0, "a fixed grid's count: Auto is 0");
+    type_at(&mut u, count_id, "4");
+    assert_eq!(count(&u), 4, "and a number is that count");
+    // A stretched grid works its width out from the frame: the field shows Auto and takes no edit.
+    let (mut u, f) = grid_ui(json!({"kind": "columns", "align": "stretch", "count": 3, "size": 0}));
+    let size_id = Id::new(("grid_field", "size", 0usize));
+    scroll_to(&mut u, size_id);
+    type_at(&mut u, size_id, "40");
+    assert_eq!(u.app.session.doc().unwrap().node(f).unwrap().grids[0].size, 0.0, "a stretched grid's width isn't set");
+    // Nor its count: a stretched grid has at least one band, so the word commits nothing.
+    type_at(&mut u, count_id, "Auto");
+    assert_eq!(u.app.session.doc().unwrap().node(f).unwrap().grids[0].count, 3, "a stretched grid keeps its count");
+
+    // The auto layout's gap: its placeholder says Auto, but Auto is a mode, not 0.
+    let mut s = Session::new();
+    let f = id(s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 400, "height": 300})).unwrap());
+    s.execute("layout.add", &json!({"ids": [f], "direction": "vertical"})).unwrap();
+    s.execute("node.set", &json!({"ids": [f], "props": {"mainAlign": "spaceBetween"}})).unwrap();
+    s.execute("select.set", &json!({"ids": [f]})).unwrap();
+    let mut u = Ui::new(s);
+    u.frame(vec![]);
+    let gap = |u: &Ui| u.app.session.doc().unwrap().node(f).unwrap().layout.as_ref().unwrap().gap;
+    let before = gap(&u);
+    type_at(&mut u, Id::new("al_gap"), "Auto");
+    assert_eq!(gap(&u), before, "the word isn't a value where Auto is a mode");
+}

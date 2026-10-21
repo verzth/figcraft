@@ -22,8 +22,9 @@ USAGE:
   figcraft-cli convert <in> <out>
   figcraft-cli render <file> -o <out.png> [--scale N] [--page NAME]
   figcraft-cli run <script.json|script.jsonl> [--in <file>] [--out <file>]
+  (info, export, convert, render and run also take --automation-read-root DIR / --automation-write-root DIR)
   figcraft-cli commands [--json] [--filter TEXT]
-  figcraft-cli mcp [--attach PORT] [--autosave]
+  figcraft-cli mcp [--attach PORT] [--autosave] [--automation-read-root DIR]... [--automation-write-root DIR]...
   figcraft-cli plugin publish <folder> --server ws://host:port/[?key=KEY]
   figcraft-cli perf [--layers N[,N...]] [--instances N[,N...]]
   figcraft-cli help | --help | --version
@@ -42,7 +43,32 @@ crop and bleed marks, CMYK colour). `run` executes a JSON array (or JSON lines) 
 `plugin publish` sends a plugin folder (figcraft-plugin.json, its module, an optional assets/ folder)
 to a figcraft-server's plugin directory as a new version; the server's key comes from the address or
 the FIGCRAFT_SERVER_KEY environment variable (which keeps it out of the shell history).
+`--automation-read-root DIR` / `--automation-write-root DIR` (each may be repeated; the folders
+must exist) confine the files a subcommand touches: reads only inside a read or write root, writes
+only inside a write root, everything else refused -- so giving no write root denies writing
+altogether. They are taken by `mcp`, to confine the agent's commands, and by `info`, `export`,
+`convert`, `render` and `run`, to confine that one run; without them a subcommand reads and writes
+as the user who started it, as before. A running app confines itself: start it with
+`figcraft --control PORT` and the same flags (`--attach` refuses them).
 See docs/cli.md and docs/mcp.md.";
+
+/// The automation roots a file subcommand was given, if any. Omitting both leaves the run
+/// unconfined, as before; giving either confines every file the subcommand touches (#833).
+const ROOT_FLAGS: [&str; 2] = ["automation-read-root", "automation-write-root"];
+
+fn roots_of(a: &Args) -> CliResult<Option<figcraft_engine::file_access::Roots>> {
+    let (read, write) = (a.values("automation-read-root"), a.values("automation-write-root"));
+    if read.is_empty() && write.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(figcraft_engine::file_access::Roots::new(read, write).map_err(CliError::Failed)?))
+}
+
+/// Runs `f` confined to the roots `a` carries.
+fn confined<R>(a: &Args, f: impl FnOnce() -> CliResult<R>) -> CliResult<R> {
+    let roots = roots_of(a)?.map(std::sync::Arc::new);
+    figcraft_engine::file_access::confined(roots.as_ref(), f)
+}
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -94,35 +120,38 @@ fn run(argv: &[String]) -> CliResult<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         "info" => {
-            let a = Args::parse(rest, &[], &["json"])?;
+            let a = Args::parse(rest, &ROOT_FLAGS, &["json"])?;
             let file = a.one_positional("info <file>")?;
-            files::info(&file, a.flag("json"))
+            confined(&a, || files::info(&file, a.flag("json")))
         }
         "export" => {
-            let a = Args::parse(rest, &["format", "scale", "page", "node", "o", "out", "bleed"], &["crop-marks", "bleed-marks", "cmyk"])?;
+            let valued = [&["format", "scale", "page", "node", "o", "out", "bleed"][..], &ROOT_FLAGS[..]].concat();
+            let a = Args::parse(rest, &valued, &["crop-marks", "bleed-marks", "cmyk"])?;
             let file = a.one_positional("export <file> -o <out>")?;
             let out = a.value("o").or_else(|| a.value("out")).ok_or_else(|| CliError::Usage("export needs -o <out>".into()))?;
             let target =
                 files::Target { format: a.value("format"), scale: a.scale()?, page: a.value("page"), node: a.value("node"), print: a.print()? };
-            files::export(&file, &out, &target)
+            confined(&a, || files::export(&file, &out, &target))
         }
         "convert" => {
-            let a = Args::parse(rest, &[], &[])?;
+            let a = Args::parse(rest, &ROOT_FLAGS, &[])?;
             match a.positional.as_slice() {
-                [i, o] => files::convert(i, o),
+                [i, o] => confined(&a, || files::convert(i, o)),
                 _ => Err(CliError::Usage("convert <in> <out>".into())),
             }
         }
         "render" => {
-            let a = Args::parse(rest, &["o", "out", "scale", "page"], &[])?;
+            let valued = [&["o", "out", "scale", "page"][..], &ROOT_FLAGS[..]].concat();
+            let a = Args::parse(rest, &valued, &[])?;
             let file = a.one_positional("render <file> -o <out.png>")?;
             let out = a.value("o").or_else(|| a.value("out")).ok_or_else(|| CliError::Usage("render needs -o <out.png>".into()))?;
-            files::render(&file, &out, a.scale()?, a.value("page").as_deref())
+            confined(&a, || files::render(&file, &out, a.scale()?, a.value("page").as_deref()))
         }
         "run" => {
-            let a = Args::parse(rest, &["in", "out"], &[])?;
+            let valued = [&["in", "out"][..], &ROOT_FLAGS[..]].concat();
+            let a = Args::parse(rest, &valued, &[])?;
             let script = a.one_positional("run <script.json|.jsonl>")?;
-            files::run_script(&script, a.value("in").as_deref(), a.value("out").as_deref())
+            confined(&a, || files::run_script(&script, a.value("in").as_deref(), a.value("out").as_deref()))
         }
         "commands" => {
             let a = Args::parse(rest, &["filter"], &["json"])?;
@@ -133,12 +162,21 @@ fn run(argv: &[String]) -> CliResult<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         "mcp" => {
-            let a = Args::parse(rest, &["attach"], &["autosave"])?;
+            let valued = [&["attach"][..], &ROOT_FLAGS[..]].concat();
+            let a = Args::parse(rest, &valued, &["autosave"])?;
             if !a.positional.is_empty() {
                 return Err(CliError::Usage("mcp takes no positional arguments".into()));
             }
             let autosave = a.flag("autosave") || std::env::var("FIGCRAFT_MCP_AUTOSAVE").is_ok_and(|v| !v.is_empty() && v != "0");
-            mcp(a.value("attach").as_deref(), autosave)
+            let attach = a.value("attach");
+            // The app runs the commands: only its own roots can confine them.
+            if attach.is_some() && ROOT_FLAGS.iter().any(|f| !a.values(f).is_empty()) {
+                return Err(CliError::Usage(
+                    "--attach can't take automation roots: start the app with them instead (`figcraft --control PORT --automation-read-root DIR ...`)"
+                        .into(),
+                ));
+            }
+            mcp(attach.as_deref(), autosave, roots_of(&a)?)
         }
         "plugin" => {
             let a = Args::parse(rest, &["server"], &[])?;
@@ -206,7 +244,7 @@ fn publish_plugin(folder: &str, server: &str) -> CliResult<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn mcp(attach: Option<&str>, autosave: bool) -> CliResult<ExitCode> {
+fn mcp(attach: Option<&str>, autosave: bool, roots: Option<figcraft_engine::file_access::Roots>) -> CliResult<ExitCode> {
     let backend: Box<dyn figcraft_mcp::Backend> = match attach {
         Some(p) => {
             let addr = if p.contains(':') {
@@ -221,7 +259,10 @@ fn mcp(attach: Option<&str>, autosave: bool) -> CliResult<ExitCode> {
         None => Box::new(figcraft_mcp::Headless::new()),
     };
     eprintln!("figcraft MCP server ({}{}) on stdio", backend.describe(), if autosave { ", autosave" } else { "" });
-    let mut server = figcraft_mcp::Server::new(backend).with_autosave(autosave);
+    if let Some(r) = &roots {
+        eprintln!("file access confined to {}", r.to_json());
+    }
+    let mut server = figcraft_mcp::Server::new(backend).with_autosave(autosave).with_roots(roots);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     server.serve(stdin.lock(), stdout.lock()).map_err(|e| format!("stdio: {e}"))?;

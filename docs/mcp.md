@@ -68,6 +68,68 @@ If that connection cannot be established, the error says the request was not sen
 A connection the app closed while it sat idle is noticed before the next request is written and
 replaced then, so a pause between calls is not an error.
 
+The app keeps answering while its window is minimised or covered by other windows (see
+`docs/control-protocol.md`): edits, inspection (`inspect_ui` too), pointer, key and text input and
+renders work as usual (minimised, each request to the app takes up to about 0.1 s). Only a capture
+of the window itself (`screenshot` with `window`) needs it on screen: it is then an error at once;
+`screenshot` without `window` renders the document instead.
+
+### Confining file access
+
+```sh
+figcraft-cli mcp --automation-read-root /work/project --automation-write-root /work/project/out
+```
+
+```json
+{"mcpServers": {"figcraft": {"command": "/path/to/figcraft-cli",
+  "args": ["mcp", "--automation-read-root", "/work/project", "--automation-write-root", "/work/project/out"]}}}
+```
+
+The two flags (the other Craft apps take the same ones) keep an agent to the folders you give it.
+Each may be given more than once, as `--flag DIR` or `--flag=DIR`:
+
+- Every file a tool call reads must lie inside a **read root or a write root**; every file it writes
+  inside a **write root**. Anything else is refused with an ordinary tool error the agent can read
+  and correct, for example `automation path rejected: /etc/x.png is outside the folders that may be
+  written: /work/project/out`. Nothing is written and the server keeps serving.
+- Read and write authority are separate. With only `--automation-read-root` nothing can be written
+  to disk (`export` and the export commands without a `path` still return the bytes). Without either
+  flag nothing changes.
+- The roots must be existing folders: a missing one, or a file, stops the server at startup.
+  `initialize`'s `instructions` name the folders, so the agent knows where it may work.
+- **What is covered:** everything a call does, because the engine reaches the file system through
+  one module (`crates/engine/src/file_access.rs`), and `crates/engine/clippy.toml` refuses `std::fs`
+  anywhere else in the engine, so a command added later is covered too. That is `open_file` (and the
+  `variables` file it may name), `save_file`, `export {path}`, and through `run_command` / `batch`
+  every command that names a file: `file.open`, `file.openRecent` (recent files outside the roots
+  are never listed, opened, removed or named: `index` counts the files listed), `file.import`,
+  `file.placeImage`, `image.place`, `file.save`, `file.saveAs`, `file.revert`, `file.recover`,
+  `file.export`, `file.exportSvg`, `file.exportLayers` (and the folders it makes), `file.exportFramesPdf`, the images and variables JSON read next to an imported REST API
+  file, `library.add` and the library files open documents link to, `variable.import` /
+  `variable.export`, `codeConnect.import` / `codeConnect.export`, `component.playground {path}`,
+  `plugin.import {path}`, a development plugin's module read again from disk,
+  `plugin.directory.publish {path}` and its assets, `collab.recoverFile {path}`, and the headless
+  `ui.render` / `ui.screenshot` with a `path`.
+- **How paths are resolved:** a relative path is made absolute against the server's working
+  directory, then its links are followed: the real path is what is compared and what is opened. For
+  a file that doesn't exist yet, its nearest existing folder is resolved and the rest must be plain
+  names, so `..` below a folder that doesn't exist is refused, and so is a link that leads nowhere
+  (writing through it would create its target, wherever that is). A path outside the roots gets
+  the same refusal whatever exists there, so a refusal doesn't tell what is outside. Folders are
+  compared by whole names: `/work2/x` is not inside `/work`. On Windows the case comes from the disk (`C:\WORK\x` is
+  inside `C:\work`), `\\?\` and UNC (`\\server\share\…`) paths are resolved like drive-letter ones,
+  and new names that are devices (`CON`, `NUL`, `COM1`…) or streams (`a.png:x`) are refused.
+- Not confined: the app's own folders, which no tool names (preferences, Data Recovery copies,
+  plugins installed from a plugin directory, the system fonts).
+- `--attach` with either flag is a usage error: the app runs the commands, so only the app can
+  confine them. Start it with the same flags, `figcraft --control 7979 --automation-read-root DIR
+  --automation-write-root DIR` (see [Control protocol](control-protocol.md#confining-file-access)),
+  then attach as usual. The attached `screenshot` gets its PNGs from the app as data, so no
+  temporary file is written anywhere.
+- A path is checked, then opened: another program that swaps a folder for a link in between can
+  still win that race. The roots keep an agent to the files it was given, not other software on the
+  computer; if that matters, run the server as a user that can't change the roots' folders.
+
 ### Fonts
 
 The headless server lays text out with the same fonts as the app: the fonts built into FigCraft
@@ -235,6 +297,13 @@ Or in a project's `.mcp.json`:
   user units, e.g. `{"wght": 550, "wdth": 85}` (`null` = back to what the style name implies);
   `text.setVariations {variations, replace?}` merges instead. `text.fonts {family, style?, axes: true}`
   lists a font's axes and named instances (named instances are also valid `fontStyle` values).
+  `text.missingFonts` lists the families the document names that aren't installed
+  (`{families: [{family, layers}]}`); their text draws in a fallback font. Fonts are indexed once
+  per process: after installing one, `text.rescanFonts` picks it up (`{added: [families]}`), and
+  `text.loadFont {path | data (base64)}` adds a font file without installing it (`{families}`).
+  Text boxes keep the size they were measured at: both refit the open document's auto-sizing text
+  in the new families (`refitted: [ids]`), and `text.refit {ids?}` does it for any text, e.g. a
+  file saved while its fonts were missing.
   OpenType features: `features {"liga": false, "tnum": true}`.
   Decorations: `textDecorationStyle` (`solid`, `dotted`, `wavy`), `textDecorationThickness` and
   `textDecorationOffset` (`auto`, px, or `"10%"` of the font size; the offset runs from the baseline
@@ -267,7 +336,11 @@ Or in a project's `.mcp.json`:
   `style.duplicate {style}` adds "<name> copy" right below, `style.renameFolder {folder, name}`.
 - **Variables**: `variable.bind` refuses a variable of a type the field doesn't take (a colour on
   `width`); scopes only filter pickers. `variable.delete` / `variable.deleteCollection` unbind the
-  layers using them (they keep their last value) and give aliases to them their values.
+  layers using them (they keep their last value) and give aliases to them their values. An
+  explicit edit that changes a bound field's value (`node.set`, `transform.resize`,
+  `object.opacityKeys`, `text.style`, `text.set`, the text size, weight and
+  tracking shortcuts, a canvas drag) detaches that field's variable; fields the edit
+  left as they were stay bound.
   `variable.addMode {from}` duplicates a mode, `variable.moveMode {collection, mode, to}` reorders
   (index 0 is the default mode, which layers on Auto follow). `variable.update {codeSyntax: {WEB?,
   iOS?, ANDROID?}}` sets code names (`""` clears); generated CSS uses the Web one.
@@ -300,7 +373,7 @@ Or in a project's `.mcp.json`:
 | `lint_layout {id?}` | Layout defects a screenshot would show (`inspect.lint`): `textOverflow` (a text needs more room than its box), `clipped` (a child reaches past a frame that clips it), `outsideParent` (a child is drawn outside a frame that doesn't clip) and `textOverlap` (two texts on top of each other), each with the layer, the frame or other text, the distance and a sentence. |
 | `set_properties {ids, props}` | `node.set` on layers (geometry, fills, strokes, effects, corner radius, auto layout, sizing, constraints, masks (`isMask`, `maskType: alpha\|vector\|luminance`), handoff status (`devStatus: none\|readyForDev\|completed`; marking again clears "Changed"), a section's `sectionContentsHidden`, text…); returns the updated layers. |
 | `inspect_document {depth, allPages}` | The document as JSON (layer tree, styles, selection, history). |
-| `get_node {id, depth}` | One layer as JSON. |
+| `get_node {id, depth}` | One layer as JSON; `pluginData` (`{key: value}`, values as strings) when the layer or page has layer data written with `set_properties {props: {pluginData}}`. |
 | `select {ids}` | Replace the selection (`[]` deselects). |
 | `export {ids, format, scale \| size, path?, bleed?, cropMarks?, bleedMarks?, cmyk?, contentsOnly?, includeBoundingBox?, svgOutlineText?, svgIdAttribute?, svgSimplifyStroke?}` | png, jpg, svg, webp, pdf, or `fig`: the whole file as `.fig`, experimental (see Exporting `.fig` files below); `size` is `2x`, `512w` or `512h`. The image covers what the layers paint (shadows towards their offset, strokes, unclipped children, a mask group's mask; hidden layers take no room; a slice is its area with everything under it); `contentsOnly: false` also draws every other layer showing in that area, `includeBoundingBox` exports the layers' own boxes; SVG: `svgOutlineText: false` keeps `<text>`, `svgIdAttribute` writes unique ids from layer names, `svgSimplifyStroke: false` writes every stroke as an outline. The same options go in export settings (`export.add` / `export.update`). PDF: frames one page each (sized in points), anything else together on one page; print options: `bleed` (points or a length like `"3mm"`, `"0.125in"`), crop and bleed marks, CMYK colour (see Exports below), also taken by `file.export`, `file.exportLayers`, `file.exportFramesPdf` and stored per export setting by `export.add` / `export.update`; `run_command` `file.exportFramesPdf {page?, path?}` writes every top-level frame of a page. Without `path`, images come back as MCP image content, SVG as text. Layers' own export settings: `run_command` with `export.add` / `export.update {index, size?, suffix?, format?}` / `export.remove` and `file.exportLayers {ids?, dir?, assets?}` (every layer once per setting, named `<layer><suffix>.<format>`, a slash in a layer name making a folder; `assets: true` exports the Inspect tab's assets instead: icons as SVG, images as PNG). |
 | `screenshot {ids?, scale?, maxSize?, window?}` | PNG of the page (with background) or of layers, scaled to fit `maxSize` (default 1600). `window: true` captures the app window in front when attached, a window id (see Windows below) that window. |
@@ -427,14 +500,27 @@ on; `key` resolves keys the way the canvas does. Commands behind keys:
   nested layers), Escape or a click drops it.
 - `pref.reduceMotion {on?}`: reduced motion (the interface's own animations off; the system's
   accessibility setting turns it on too). Prototype transitions still play.
+- `pref.uiScale {scale?}`: how large the whole interface is drawn, relative to the system's display
+  scale: 1 (the default) is the system's own size on every screen, 1.25 means 125 %, not 125; from
+  0.75 to 3 (outside the range it stops at the nearest end; `"auto"` is 1). Omit `scale` to read it.
+  The canvas zoom is separate. A window too small for a size above 100 % draws a smaller one until
+  it is larger; the choice is kept. In the browser the interface always follows the browser's zoom.
 - `pref.autoSave {on?}`: files that have a path save themselves a few seconds after they change
   (off by default; the desktop app's timer does it, so scripts still call `file.save`).
-- `pref.language {language: system|en|cs|ru|es|es-419|fr|de|pt-BR|ja|ko|zh-Hans|…}`: the app's interface language, applied live ("system":
-- `pref.language {language: system|en|es|es-419|fr|de|pt-BR|ja|ko|sv|zh-Hans|…}`: the app's interface language, applied live ("system":
+- `pref.startOnHome {on?}`: the desktop app starts on the Home screen instead of in a new file
+  (off by default; files named on the command line still open, and `--control` starts in a new
+  file anyway, so control callers have a document).
+- `pref.language {language: system|en|cs|ru|es|es-419|fr|de|pt-BR|ja|ka|ko|sv|zh-Hans|…}`: the app's interface language, applied live ("system":
   the OS or browser language; a language without a catalog shows English). Command ids, labels and
   every result stay English.
 
 ### Editing vectors
+
+`vector.create {path | points}` makes the layer's box from the geometry; `width`/`height` scale
+the geometry to the size asked for (with both, each side independently; with one, the other keeps
+its proportion). A path or point set that draws nothing is refused instead of making an invisible
+0×0 layer, as is a size on an axis the geometry has none of (except 0, such as a horizontal line's
+height) and a size of 0 or less on an axis it has, which would flatten it.
 
 Vector edit mode is driven with `run_command` (or `pointer`/`key` for gestures):
 `vector.edit.begin {id? | ids?}` (default the selection; converts shapes to vectors; several layers
@@ -893,10 +979,13 @@ path?}` writes this file's collections (default: all but library copies) as a lo
 response (`format: "json"`, the default) or as CSS custom properties (`format: "css"`: the default
 mode on `:root`, each other mode on `[data-<collection>="<mode>"]`, aliases as `var(--name)`), and
 returns `{text}` (or writes `path` and returns `{path}`). `variable.import {variables}` (an object,
-JSON text or a path) reads one back: a collection joins this file's collection of the same name
+JSON text or a path; `variableCollections` and `variables` under `meta` or at the top level) reads
+one back: a collection joins this file's collection of the same name
 (values matched by mode name, new modes and variables added, a same-named variable of another type
 skipped with a warning; library copies and extended collections are never targets), others are
-added; aliases are checked for loops; it returns `{collections, variables, updated, warnings}`. The
+added; aliases are checked for loops; it returns `{collections, variables, updated, warnings}`,
+with a warning when the JSON holds no variables (`no variables found: expected meta.variables …`)
+or fewer than its collections list in `variableIds`. The
 Variables editor's Import… and Export… buttons do the same through file dialogs.
 
 Strokes take colour styles and variables like fills: `style.apply {style, target: "stroke"}` links
@@ -979,10 +1068,11 @@ branches). Driven with `run_command`:
   name, property, branch, main, deletedBy?}]}`. `layers` are the changed layers with their property
   changes formatted like Inspect (`fill #2563EB → #DC2626`); `document` lists styles, variables,
   comments and file settings. A conflict is the same property changed on both sides to different
-  values (key `<layer id>/<property>`, e.g. `4/fills`; fills, strokes and effects compare item by
-  item, so changing different items of one list on each side, or adding items at its end on one
-  side, merges without a conflict; a layer's parent and position are one
-  property, `parent`), a layer deleted on one side while the other edited it or what's inside it
+  values (key `<layer id>/<property>`, e.g. `4/fills`; fills, strokes, effects, layout grids,
+  export settings, guides, prototype interactions, annotations and Dev Mode resources compare item
+  by item, so changing different items of one list on each side, or adding items at its end on one
+  side, merges without a conflict; other lists, such as code links, compare whole; a layer's parent
+  and position are one property, `parent`), a layer deleted on one side while the other edited it or what's inside it
   (`<layer id>/layer`, with `deletedBy`), or a document-level entry or setting changed on both sides
   (`style/<id>`, `variable/<id>`, `comment/<id>`, `doc/<property>`…).
 - `branch.merge {id?, resolutions?}` merges the branch into the main file as one undo step,
@@ -1430,6 +1520,27 @@ through the outlines of its layers.
   clears it; no `preset` reads it). The desktop app reads pressure from pen input on Windows; in the
   browser from stylus touch events that report a force; macOS and Linux tablets report none.
 
+### Selection colors
+
+`selection.colors {ids?}` returns `{colors: [{paint, style, variable, targets}]}` across the
+selection and its descendants, deduplicating overlapping roots. Only visible solid and gradient
+paints are listed; masks and boolean operands are omitted. Styles and variables distinguish
+otherwise equal paints. Each target is `{id, fills, index, range}`; `range` is null for a node
+paint or `[start, end]` in character offsets for an effective text-range fill.
+
+Pass the returned target list to:
+
+- `selection.setPaint {targets, paint}` to replace only those slots (same paint syntax as `fill.set`).
+- `selection.selectColor {targets}` to select their distinct owning layers, without a document undo step.
+- `selection.applyColorStyle {targets, style}` to apply a document paint style. As with `style.apply`,
+  this replaces the matching node's entire fill/stroke list and links the style. Text ranges copy
+  resolved paints and keep their typography, without a paint-style link.
+
+Keep the targets fixed throughout a live interaction. A color becoming equal to another color
+must not add slots to the gesture. Invalid or missing targets fail atomically. Direct paint edits
+detach bindings on changed paint values (opacity alone keeps the color binding); a text-range edit preserves the node bindings other
+characters still inherit. Each mutating command is one undo step (an interaction can group them).
+
 ### Paint, effect and layout grid lists
 
 A layer's fills, strokes, effects and layout grids are lists kept **bottom first**: index 0 paints
@@ -1595,6 +1706,18 @@ the instance's text layer id with `get_node`):
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"instance.create","params":{"component":2,"x":500,"y":100}}}}
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"type_text","arguments":{"id":7,"text":"Grace Hopper"}}}
 ```
+
+Smart-selection spacing (movable siblings in rows, columns or aligned grids):
+
+```json
+{"jsonrpc":"2.0","id":"spacing","method":"tools/call","params":{"name":"run_command","arguments":{"command":"arrange.spacing","params":{"ids":[3,4,5],"horizontal":24}}}}
+```
+
+`horizontal` and `vertical` are optional page-unit gaps (at least one is required, magnitude at
+most 1,000,000). The first column/row stays fixed; subsequent tracks move without changing sizes,
+parents or offsets inside each track. Nonuniform gaps become uniform. Normal auto-layout flow
+children, locked/hidden layers and instance internals are excluded. Interactive callers may pass
+`fromGesture: true` inside an interaction to keep using its original tracks during a scrub.
 
 Align and distribute as one undo step:
 

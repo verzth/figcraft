@@ -886,6 +886,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-docpath"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=82a24b006eefa036b43c09a67fb9a3fbd17ffe63#82a24b006eefa036b43c09a67fb9a3fbd17ffe63"
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1443,7 +1448,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "figcraft"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "arboard",
  "eframe",
@@ -1459,17 +1464,20 @@ dependencies = [
  "fmv-macos-events",
  "image",
  "log",
+ "raw-window-handle",
  "rfd",
  "serde_json",
  "wat",
+ "wayland-client",
  "webbrowser",
  "windows",
+ "winit",
  "winresource",
 ]
 
 [[package]]
 name = "figcraft-agent"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-mcp",
@@ -1480,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-cli"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "figcraft-doc",
  "figcraft-engine",
@@ -1494,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-collab"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-color",
@@ -1509,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-collab-net"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-collab",
@@ -1532,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-color"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "kurbo",
  "serde",
@@ -1541,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-doc"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "figcraft-color",
  "figcraft-geom",
@@ -1553,9 +1561,10 @@ dependencies = [
 
 [[package]]
 name = "figcraft-engine"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
+ "craft-docpath",
  "figcraft-collab",
  "figcraft-color",
  "figcraft-doc",
@@ -1580,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-format"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "figcraft-doc",
  "figcraft-pathops",
@@ -1595,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-geom"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "kurbo",
  "serde",
@@ -1603,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-layout"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "figcraft-doc",
  "figcraft-geom",
@@ -1611,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-mcp"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-collab-net",
@@ -1627,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-pathops"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "figcraft-doc",
  "figcraft-geom",
@@ -1636,7 +1645,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-pdf"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "figcraft-color",
  "figcraft-doc",
@@ -1648,12 +1657,12 @@ dependencies = [
  "krilla",
  "log",
  "thiserror 2.0.21",
- "tiny-skia",
+ "tiny-skia 0.12.0",
 ]
 
 [[package]]
 name = "figcraft-plugin"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "figcraft-color",
  "serde",
@@ -1666,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-render"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "crc32fast",
  "figcraft-color",
@@ -1679,12 +1688,12 @@ dependencies = [
  "moxcms",
  "png",
  "rayon",
- "tiny-skia",
+ "tiny-skia 0.12.0",
 ]
 
 [[package]]
 name = "figcraft-server"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "crc32fast",
  "ctrlc",
@@ -1708,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-svg"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-color",
@@ -1724,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-text"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "figcraft-doc",
  "figcraft-geom",
@@ -1738,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-ui-egui"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "egui",
@@ -1764,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "figcraft-web"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "eframe",
  "egui",
@@ -2619,7 +2628,7 @@ dependencies = [
  "skrifa 0.42.1",
  "smallvec",
  "subsetter",
- "tiny-skia-path",
+ "tiny-skia-path 0.12.0",
  "xmp-writer",
  "yoke",
  "zune-jpeg",
@@ -4080,6 +4089,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "sctk-adwaita"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6277f0217056f77f1d8f49f2950ac6c278c0d607c45f5ee99328d792ede24ec"
+dependencies = [
+ "log",
+ "smithay-client-toolkit 0.19.2",
+ "tiny-skia 0.11.4",
+]
+
+[[package]]
 name = "self_cell"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4570,6 +4590,20 @@ dependencies = [
 
 [[package]]
 name = "tiny-skia"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83d13394d44dae3207b52a326c0c85a8bf87f1541f23b0d143811088497b09ab"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "bytemuck",
+ "cfg-if",
+ "log",
+ "tiny-skia-path 0.11.4",
+]
+
+[[package]]
+name = "tiny-skia"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea"
@@ -4580,7 +4614,18 @@ dependencies = [
  "cfg-if",
  "log",
  "png",
- "tiny-skia-path",
+ "tiny-skia-path 0.12.0",
+]
+
+[[package]]
+name = "tiny-skia-path"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "strict-num",
 ]
 
 [[package]]
@@ -4901,7 +4946,7 @@ dependencies = [
  "skrifa 0.44.0",
  "strict-num",
  "svgtypes",
- "tiny-skia-path",
+ "tiny-skia-path 0.12.0",
  "unicode-bidi",
  "unicode-script",
  "unicode-vo",
@@ -5860,6 +5905,7 @@ dependencies = [
  "raw-window-handle",
  "redox_syscall 0.4.1",
  "rustix 0.38.44",
+ "sctk-adwaita",
  "smithay-client-toolkit 0.19.2",
  "smol_str",
  "tracing",
@@ -6017,7 +6063,7 @@ checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 
 [[package]]
 name = "xtask"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "figcraft-engine",
  "serde_json",

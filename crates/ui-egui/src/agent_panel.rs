@@ -992,11 +992,24 @@ fn dropped(app: &mut FigApp, ctx: &egui::Context) {
         let path = file.path().to_path_buf();
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "context.txt".to_string());
         // A file on disk is read by path; a drop with no file behind it carries its bytes.
-        let bytes = if path.exists() { std::fs::read(&path).ok() } else { crate::dropped_bytes(&file) };
+        let bytes = if path.exists() { std::fs::read(&path).ok() } else { dropped_now(&file) };
         if let Some(bytes) = bytes {
             add_pending(app, name, bytes);
         }
     }
+}
+
+/// A drop's bytes, read right here: the browser hands its own over asynchronously and this panel
+/// still takes them in the frame it sees the drop in (as it did before the shared helper grew a
+/// future; `pending_open` queues those for the rest of the app).
+#[cfg(not(target_arch = "wasm32"))]
+fn dropped_now(f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
+    f.bytes().ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn dropped_now(_f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
+    None
 }
 
 /// One file chosen with the attach button: read it by path, and let it in as a drop would.

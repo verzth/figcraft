@@ -628,15 +628,16 @@ pub fn dev_resources_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, id: 
         }
         icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + PAD + 7.0, r.center().y), vec2(14.0, 14.0)), Icon::Link, t.icon_secondary);
         let x = r.min.x + PAD + 22.0;
-        ui.painter().text(pos2(x, r.center().y - 7.0), Align2::LEFT_CENTER, widgets::elide(ui, name, text_w), semibold(11.0), ACCENT);
+        ui.painter().text(pos2(x, r.center().y - 7.0), Align2::LEFT_CENTER, widgets::elide(ui, name, text_w), semibold(11.0), t.accent_text);
         let below = match item.from.and_then(|f| doc.node(f)) {
             Some(m) => trf("From {name}", &[("name", &m.name)]),
             None => url.clone(),
         };
         ui.painter().text(pos2(x, r.center().y + 7.0), Align2::LEFT_CENTER, widgets::elide(ui, &below, text_w), regular(10.0), t.text_secondary);
         crate::a11y::link(&resp, name);
-        // Opened only on a click, never fetched.
-        if resp.on_hover_text(url.as_str()).clicked() {
+        // Opened only on a click, never fetched, and a dev resource's URL comes from the
+        // document, so only a web link opens.
+        if resp.on_hover_text(url.as_str()).clicked() && figcraft_engine::doc_urls::openable(url) {
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
         }
         if let Some(i) = item.index {
