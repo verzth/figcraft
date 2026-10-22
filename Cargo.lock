@@ -1467,6 +1467,7 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "serde_json",
+ "toml",
  "wat",
  "wayland-client",
  "webbrowser",

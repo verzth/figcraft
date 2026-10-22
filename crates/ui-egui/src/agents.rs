@@ -39,7 +39,7 @@ pub struct ServerStatus {
 /// An MCP client the app can install itself in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Client {
-    /// A stable id: "claude-code", "claude-desktop", "cursor".
+    /// A stable id: "claude-code", "codex", "opencode", "claude-desktop", "cursor".
     pub id: &'static str,
     /// Its product name, as the client calls itself.
     pub name: &'static str,

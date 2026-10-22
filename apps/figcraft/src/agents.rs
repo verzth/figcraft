@@ -1,10 +1,12 @@
 //! Preferences ▸ AI agents, the desktop side: the control server MCP clients reach the app through,
-//! and FigCraft's entry in the clients' settings (Claude Code, Claude Desktop, Cursor).
+//! and FigCraft's entry in the clients' settings (Claude Code, Codex, OpenCode, Claude Desktop,
+//! Cursor).
 //!
 //! A client runs `<this app> mcp --attach PORT` (main.rs), the MCP server attached to this window.
-//! Claude Code is set up through its own CLI (`claude mcp add`), never by editing `~/.claude.json`,
-//! which a running Claude Code rewrites; Claude Desktop and Cursor keep their servers in a JSON file
-//! that only gains or loses FigCraft's entry, everything else as it was.
+//! Claude Code and Codex are set up through their own CLIs (`claude mcp add`, `codex mcp add`),
+//! never by editing their settings files, which a running client rewrites; Claude Desktop, Cursor
+//! and OpenCode keep their servers in a JSON file that only gains or loses FigCraft's entry,
+//! everything else as it was.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,6 +38,9 @@ pub struct DesktopAgents {
     home: Option<PathBuf>,
     /// This app's executable, which the clients run as `… mcp --attach PORT`.
     exe: PathBuf,
+    /// Codex's settings folder: `CODEX_HOME` when it is set, else `<home>/.codex` — the folder
+    /// `codex` itself reads and writes, so the row here and what the CLI does never disagree.
+    codex_home: PathBuf,
     /// The direct-API keys from the config folder (AgentKeys.json), loaded at startup.
     keys: figcraft_agent::ApiKeys,
 }
@@ -44,8 +49,9 @@ impl DesktopAgents {
     pub fn new(queue: Queue, ctx: CtxSlot) -> Self {
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("figcraft"));
+        let codex_home = std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.clone().unwrap_or_default().join(".codex"));
         let keys = crate::services::config_dir().map(|d| figcraft_agent::ApiKeys::load(&d.join(figcraft_agent::FILE_NAME))).unwrap_or_default();
-        Self { queue, ctx, server: None, error: None, home, exe, keys }
+        Self { queue, ctx, server: None, error: None, home, exe, codex_home, keys }
     }
 
     #[cfg(test)]
@@ -58,6 +64,7 @@ impl DesktopAgents {
             error: None,
             home: Some(home.to_path_buf()),
             exe: exe.to_path_buf(),
+            codex_home: home.join(".codex"),
             keys: figcraft_agent::ApiKeys::default(),
         }
     }
@@ -65,6 +72,11 @@ impl DesktopAgents {
     /// The command a client runs to reach this app on `port`.
     fn entry(&self, port: u16) -> Value {
         json!({"command": self.exe.to_string_lossy(), "args": ["mcp", "--attach", port.to_string()]})
+    }
+
+    /// The same command in OpenCode's shape: one `command` array, a type and an enabled flag.
+    fn opencode_entry(&self, port: u16) -> Value {
+        json!({"type": "local", "enabled": true, "command": [self.exe.to_string_lossy(), "mcp", "--attach", port.to_string()]})
     }
 
     fn json_config(&self, id: &str) -> Option<PathBuf> {
@@ -105,6 +117,45 @@ impl DesktopAgents {
     fn claude_cli(&self, args: &[&str]) -> Result<String, String> {
         let bin = self.home.as_deref().and_then(find_claude).ok_or("Claude Code's `claude` command wasn't found")?;
         run(Command::new(bin).args(args))
+    }
+
+    /// Codex: its MCP servers live in `config.toml` (`CODEX_HOME`, else `~/.codex`). The file is
+    /// only read here — `codex mcp add` / `remove` write it, since a running Codex rewrites it.
+    fn codex(&self, port: u16) -> Client {
+        let home = self.home.as_deref();
+        let bin = home.and_then(|h| find_command(h, "codex", &[]));
+        let file = self.codex_home.join("config.toml");
+        let installed = read_toml(&file).and_then(|v| toml_entry_port(&v));
+        let state = match (installed, &bin) {
+            (Some(p), _) => ClientState::Installed { same_port: p == port },
+            (None, Some(_)) => ClientState::Available,
+            (None, None) => ClientState::Missing,
+        };
+        let detail = match (bin, file) {
+            (Some(b), _) => tilde(home, &b),
+            (None, f) => tilde(home, &f),
+        };
+        Client { id: "codex", name: "Codex", state, detail }
+    }
+
+    /// OpenCode: its MCP servers live in the global `opencode.json`, edited here — its CLI adds
+    /// servers but has none for taking one out again.
+    fn opencode(&self, port: u16) -> Client {
+        let home = self.home.as_deref();
+        let bin = home.and_then(|h| find_command(h, "opencode", &[]));
+        let file = opencode_config(home);
+        let installed = file.as_deref().and_then(|p| read_json(p).ok()).and_then(|v| opencode_entry_port(&v));
+        let state = match (installed, &bin) {
+            (Some(p), _) => ClientState::Installed { same_port: p == port },
+            (None, Some(_)) => ClientState::Available,
+            (None, None) => ClientState::Missing,
+        };
+        let detail = match (bin, file) {
+            (Some(b), _) => tilde(home, &b),
+            (None, Some(f)) => tilde(home, &f),
+            (None, None) => String::new(),
+        };
+        Client { id: "opencode", name: "OpenCode", state, detail }
     }
 }
 
@@ -157,7 +208,13 @@ impl AgentHost for DesktopAgents {
     }
 
     fn clients(&mut self, port: u16) -> Vec<Client> {
-        vec![self.claude_code(port), self.json_client("claude-desktop", "Claude Desktop", port), self.json_client("cursor", "Cursor", port)]
+        vec![
+            self.claude_code(port),
+            self.codex(port),
+            self.opencode(port),
+            self.json_client("claude-desktop", "Claude Desktop", port),
+            self.json_client("cursor", "Cursor", port),
+        ]
     }
 
     fn install(&mut self, id: &str, port: u16) -> Result<String, String> {
@@ -184,6 +241,32 @@ impl AgentHost for DesktopAgents {
                     "FigCraft is installed in Claude Desktop: quit and reopen Claude Desktop to load it".into()
                 })
             }
+            "codex" => {
+                let bin = self.home.as_deref().and_then(|h| find_command(h, "codex", &[])).ok_or("Codex's `codex` command wasn't found")?;
+                // A FigCraft entry with another port goes first (`add` keeps the name it is given).
+                let _ = run(Command::new(&bin).args(["mcp", "remove", SERVER_NAME]));
+                let exe = self.exe.to_string_lossy().into_owned();
+                let port = port.to_string();
+                run(Command::new(&bin).args(["mcp", "add", SERVER_NAME, "--", &exe, "mcp", "--attach", &port]))?;
+                Ok("FigCraft is installed in Codex: start a new Codex session to use it".into())
+            }
+            "opencode" => {
+                let path = opencode_config(self.home.as_deref()).ok_or("the settings folder wasn't found")?;
+                let jsonc = path.with_extension("jsonc");
+                if !path.exists() && jsonc.exists() {
+                    return Err(format!(
+                        "{} holds OpenCode's settings: add the entry there by hand, or copy the settings",
+                        tilde(self.home.as_deref(), &jsonc)
+                    ));
+                }
+                let current = match read_json(&path) {
+                    Ok(v) => Some(v),
+                    Err(ReadError::Missing) => None,
+                    Err(ReadError::Invalid(e)) => return Err(format!("{} isn't valid JSON ({e}): fix or remove it first", path.display())),
+                };
+                write_json(&path, &with_opencode_entry(current, self.opencode_entry(port)))?;
+                Ok("FigCraft is installed in OpenCode: start a new OpenCode session to use it".into())
+            }
             _ => Err(format!("unknown client `{id}`")),
         }
     }
@@ -195,6 +278,18 @@ impl AgentHost for DesktopAgents {
                 let path = self.json_config(id).ok_or("the settings folder wasn't found")?;
                 match read_json(&path) {
                     Ok(v) => write_json(&path, &without_entry(v)),
+                    Err(ReadError::Missing) => Ok(()),
+                    Err(ReadError::Invalid(e)) => Err(format!("{} isn't valid JSON ({e})", path.display())),
+                }
+            }
+            "codex" => {
+                let bin = self.home.as_deref().and_then(|h| find_command(h, "codex", &[])).ok_or("Codex's `codex` command wasn't found")?;
+                run(Command::new(&bin).args(["mcp", "remove", SERVER_NAME])).map(|_| ())
+            }
+            "opencode" => {
+                let path = opencode_config(self.home.as_deref()).ok_or("the settings folder wasn't found")?;
+                match read_json(&path) {
+                    Ok(v) => write_json(&path, &without_opencode_entry(v)),
                     Err(ReadError::Missing) => Ok(()),
                     Err(ReadError::Invalid(e)) => Err(format!("{} isn't valid JSON ({e})", path.display())),
                 }
@@ -365,6 +460,87 @@ pub fn entry_port(settings: &Value) -> Option<u16> {
     let i = args.iter().position(|a| a == "--attach")?;
     let port = args.get(i + 1)?;
     port.as_str().and_then(|p| p.rsplit(':').next()?.parse().ok()).or_else(|| port.as_u64().and_then(|p| u16::try_from(p).ok()))
+}
+
+/// OpenCode's global settings file: the one `opencode mcp add --global` writes.
+fn opencode_config(home: Option<&Path>) -> Option<PathBuf> {
+    Some(home?.join(".config/opencode/opencode.json"))
+}
+
+/// FigCraft's entry in OpenCode's `mcp` section: OpenCode reads servers both as `mcp.<name>` and
+/// as `mcp.servers.<name>`, so both are looked for here.
+fn opencode_server(settings: &Value) -> Option<&Value> {
+    let mcp = settings.get("mcp")?;
+    mcp.get(SERVER_NAME).or_else(|| mcp.get("servers")?.get(SERVER_NAME))
+}
+
+/// The port FigCraft's OpenCode entry attaches to, if it has one.
+pub fn opencode_entry_port(settings: &Value) -> Option<u16> {
+    let words = opencode_server(settings)?.get("command")?.as_array()?;
+    let words: Vec<&str> = words.iter().filter_map(Value::as_str).collect();
+    let i = words.iter().position(|w| *w == "--attach")?;
+    words.get(i + 1)?.rsplit(':').next()?.parse().ok()
+}
+
+/// `settings` with FigCraft's server entry set in OpenCode's spelling, every other key kept.
+pub fn with_opencode_entry(settings: Option<Value>, entry: Value) -> Value {
+    let mut root = match settings {
+        Some(Value::Object(o)) => o,
+        _ => Map::new(),
+    };
+    let mcp = root.entry("mcp").or_insert_with(|| json!({}));
+    if !mcp.is_object() {
+        *mcp = json!({});
+    }
+    // The spelling the file already uses; a new one starts flat, as OpenCode writes it.
+    let nested = mcp.get("servers").is_some_and(Value::is_object);
+    if nested {
+        if let Some(servers) = mcp.get_mut("servers").and_then(Value::as_object_mut) {
+            servers.insert(SERVER_NAME.into(), entry);
+        }
+    } else if let Some(mcp) = mcp.as_object_mut() {
+        mcp.insert(SERVER_NAME.into(), entry);
+    }
+    Value::Object(root)
+}
+
+/// `settings` without FigCraft's server entry, every other key kept.
+pub fn without_opencode_entry(mut settings: Value) -> Value {
+    if let Some(mcp) = settings.get_mut("mcp") {
+        if let Some(servers) = mcp.get_mut("servers").and_then(Value::as_object_mut) {
+            servers.remove(SERVER_NAME);
+        }
+        if let Some(mcp) = mcp.as_object_mut() {
+            mcp.remove(SERVER_NAME);
+        }
+    }
+    settings
+}
+
+/// Codex's `config.toml`, read with the same TOML dialect its CLI writes. A file that doesn't
+/// parse is simply "no entry here": `codex mcp add` writes it, this never does.
+fn read_toml(path: &Path) -> Option<toml::Value> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > MAX_SETTINGS {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    toml::from_str(&text).ok()
+}
+
+/// The port FigCraft's entry in a Codex `config.toml` attaches to, if it has one.
+fn toml_entry_port(v: &toml::Value) -> Option<u16> {
+    let args = v.get("mcp_servers")?.get(SERVER_NAME)?.get("args")?.as_array()?;
+    let words: Vec<String> = args
+        .iter()
+        .filter_map(|a| match a {
+            toml::Value::String(s) => Some(s.clone()),
+            toml::Value::Integer(i) => Some(i.to_string()),
+            _ => None,
+        })
+        .collect();
+    let i = words.iter().position(|w| w == "--attach")?;
+    words.get(i + 1)?.rsplit(':').next()?.parse().ok()
 }
 
 /// Run a command, its output as the error when it fails, giving up after [`CLI_TIMEOUT`].

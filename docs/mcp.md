@@ -148,13 +148,15 @@ Preferences ▸ AI agents turns MCP on and sets the clients up:
 1. **Turn on MCP** starts the control server on 127.0.0.1 (port 7979 unless you change it), now and,
    with *Turn on when FigCraft starts*, every time the app opens. If another app already uses the
    port, the tab says so and offers the next free one.
-2. **Connect a client** lists Claude Code, Claude Desktop and Cursor as found on this computer.
+2. **Connect a client** lists Claude Code, Codex, OpenCode, Claude Desktop and Cursor as found on
+   this computer.
    *Install* adds FigCraft to the client's settings, pointing at `<the app> mcp --attach <port>`:
-   through `claude mcp add figcraft -s user` for Claude Code, and by adding one `figcraft` entry to
-   Claude Desktop's `claude_desktop_config.json` or Cursor's `~/.cursor/mcp.json` (every other entry
-   is kept; a file that isn't valid JSON is never overwritten). *Remove* takes the entry out again,
-   and a client set up for another port offers *Update port*. *Copy settings* puts the same entry on
-   the clipboard for any other MCP client.
+   through `claude mcp add figcraft -s user` for Claude Code and `codex mcp add figcraft` for Codex,
+   and by adding one `figcraft` entry to Claude Desktop's `claude_desktop_config.json`, Cursor's
+   `~/.cursor/mcp.json` or OpenCode's global `opencode.json` (every other entry is kept; a file that
+   isn't valid JSON is never overwritten, and one written as `opencode.jsonc` is left to the person
+   who wrote it). *Remove* takes the entry out again, and a client set up for another port offers
+   *Update port*. *Copy settings* puts the same entry on the clipboard for any other MCP client.
 3. While an agent is connected, the tab strip shows its name (from the MCP `clientInfo`), and the tab
    lists what it changed. *Save files automatically* (the same preference as General's) saves files
    that have a path a few seconds after any change, the agent's included.
@@ -200,6 +202,45 @@ Or in a project's `.mcp.json`:
   }
 }
 ```
+
+### Codex
+
+```sh
+# headless
+codex mcp add figcraft -- /path/to/figcraft-cli mcp
+# drive the running app (start it with: figcraft --control 7979)
+codex mcp add figcraft -- /path/to/figcraft-cli mcp --attach 7979
+```
+
+Or in `~/.codex/config.toml` (the folder `CODEX_HOME` names, when it is set):
+
+```toml
+[mcp_servers.figcraft]
+command = "/path/to/figcraft-cli"
+args = ["mcp", "--attach", "7979"]
+```
+
+### OpenCode
+
+```sh
+opencode mcp add figcraft --global -- /path/to/figcraft-cli mcp --attach 7979
+```
+
+Or in the global `~/.config/opencode/opencode.json` (OpenCode reads a server both as `mcp.figcraft`
+and as `mcp.servers.figcraft`, and writes the first; FigCraft writes whichever the file already
+uses and reads both):
+
+```json
+{
+  "mcp": {
+    "figcraft": { "type": "local", "enabled": true,
+      "command": ["/path/to/figcraft-cli", "mcp", "--attach", "7979"] }
+  }
+}
+```
+
+OpenCode's CLI adds servers but has no command for removing one: *Remove* in Preferences takes the
+entry out of the file itself.
 
 ## Conventions agents must know
 
