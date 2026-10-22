@@ -256,6 +256,61 @@ fn with_a_backend_the_names_stay_inside_the_panel() {
     }
 }
 
+/// The model picker's top section is whom the turn runs on — the fix for "the models are read
+/// but there's no way to send them to Codex or OpenCode": every installed CLI is listed there,
+/// and picking one takes a model it runs along with it.
+#[test]
+fn the_model_pickers_top_section_chooses_the_backend_and_the_model_moves_with_it() {
+    let mut u = tab();
+    u.app.ui.agent.backends = vec![
+        crate::agents::PanelBackend { kind: BackendKind::ClaudeCode, bin: Some("/bin/claude".into()) },
+        crate::agents::PanelBackend { kind: BackendKind::Codex, bin: Some("/bin/codex".into()) },
+        crate::agents::PanelBackend { kind: BackendKind::OpenCode, bin: Some("/bin/opencode".into()) },
+    ];
+    // Plant the backends rather than scanning this machine: `resolved` makes the scan a no-op.
+    u.app.ui.agent.resolved = true;
+    u.frame(vec![]);
+    egui::Popup::open_id(&u.ctx, egui::Id::new("agent_model_picker"));
+    // The popup's first frame is an invisible sizing pass; it appears on the next.
+    u.frame_output(vec![]);
+    let s = drawn(&mut u);
+    assert!(has_text(&s, "RUN ON"), "the picker's top section names whom a turn runs on");
+    for name in ["Claude Code", "Codex", "OpenCode"] {
+        assert!(has_text(&s, name), "the installed {name} is listed");
+    }
+    assert_eq!(u.app.ui.agent.effective_name(), "Claude Code", "the default turn runs on Claude Code");
+    // Codex: a GPT model comes with it, and the name follows the route.
+    click(&mut u, text_center(&s, "Codex"));
+    u.frame(vec![]);
+    assert_eq!(u.app.ui.agent.backend, 1, "Codex is the backend now");
+    assert_eq!(u.app.ui.agent.models.label(), "GPT 6.1 Sol", "a Codex backend takes a GPT model");
+    assert_eq!(u.app.ui.agent.effective_name(), "Codex", "the row beside the picker would name the same");
+}
+
+/// The name stays on the CLI that really runs the turn: picking a model from another provider
+/// moves the backend with it instead of promising one that can't run the model.
+#[test]
+fn picking_a_model_moves_the_backend_that_runs_it() {
+    let mut u = tab();
+    u.app.ui.agent.backends = vec![
+        crate::agents::PanelBackend { kind: BackendKind::ClaudeCode, bin: Some("/bin/claude".into()) },
+        crate::agents::PanelBackend { kind: BackendKind::Codex, bin: Some("/bin/codex".into()) },
+    ];
+    u.app.ui.agent.resolved = true;
+    u.frame(vec![]);
+    egui::Popup::open_id(&u.ctx, egui::Id::new("agent_model_picker"));
+    u.app.ui.agent.models.focus_search(); // what opening via the trigger does
+    u.frame_output(vec![]);
+    // The GPT rows sit under twelve Claude rows, past the list's viewport: search first, as a
+    // user does.
+    u.frame(vec![egui::Event::Text("gpt".into())]);
+    let s = drawn(&mut u);
+    click(&mut u, text_center(&s, "GPT 6.1 Sol"));
+    u.frame(vec![]);
+    assert_eq!(u.app.ui.agent.backend, 1, "the model picker moved the backend to the CLI that runs it");
+    assert_eq!(u.app.ui.agent.effective_name(), "Codex", "and the name tells the truth");
+}
+
 /// One more frame, and the shapes it drew.
 fn drawn(u: &mut Ui) -> Vec<Shape> {
     u.frame(vec![]);

@@ -210,6 +210,16 @@ pub enum Route {
     NoBackend,
 }
 
+impl Route {
+    /// The backend this route runs on — the name the picker shows as whom the turn runs on.
+    pub fn kind(&self) -> Option<BackendKind> {
+        match self {
+            Route::Selected(kind) | Route::Model { kind, .. } => Some(*kind),
+            Route::Unsupported(_) | Route::NoBackend => None,
+        }
+    }
+}
+
 /// The picker's state: the whole list, what's picked, and the live list in flight.
 #[derive(Default)]
 pub struct Models {
@@ -319,6 +329,27 @@ impl Models {
         self.picked = Some(index);
         self.explicit = true;
         self.search.clear();
+    }
+
+    /// Move the pick to a model the given backend runs — what a backend switch means: keep the
+    /// picked one when that backend takes it (OpenCode takes every provider's under its
+    /// prefix), else that provider's own default — Sonnet on Claude, GPT on Codex, as the
+    /// starting picks do.
+    pub fn align(&mut self, kind: BackendKind) {
+        let runs = |c: &ModelChoice| c.runners.contains(&kind);
+        if self.picked.is_some_and(|p| self.choices.get(p).is_some_and(runs)) {
+            return;
+        }
+        let start = match kind {
+            BackendKind::ClaudeCode | BackendKind::AnthropicApi => CLAUDE_DEFAULT,
+            BackendKind::Codex | BackendKind::OpenAiApi => CLAUDE.len(),
+            BackendKind::OpenCode => 0,
+        };
+        let len = self.choices.len();
+        let found = (start..len).chain(0..start).find(|&i| self.choices.get(i).is_some_and(runs));
+        if let Some(i) = found {
+            self.pick(i);
+        }
     }
 
     /// The search box takes the caret the next time the popup draws.

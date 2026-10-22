@@ -211,6 +211,12 @@ impl AgentUi {
         self.backends.get(self.backend).map(|b| b.kind.name().to_string()).unwrap_or_else(|| tr("Agent").to_string())
     }
 
+    /// Whom the next turn really runs on — the picked model's route, which may fall to another
+    /// CLI than the selected one — named for the row beside the model picker.
+    pub fn effective_name(&self) -> String {
+        self.models.route(&self.backends, self.backend).kind().map(|k| k.name().to_string()).unwrap_or_else(|| self.selected_name())
+    }
+
     /// Whom the tab-strip pill names: the active conversation's backend once it has spoken,
     /// else the backend the next turn would use.
     pub fn pill_name(&self) -> String {
@@ -759,7 +765,8 @@ fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
                         attach_button(app, ui, &t);
                         parallel_pill(app, ui, &t);
                         iterate_pill(app, ui, &t);
-                        // Right: the model picker, then the round send button (Stop while it works).
+                        // Right: the model picker with whom to run on, then the round send
+                        // button (Stop while it works).
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                             if send_stop(ui, running, sendable, &t) {
                                 if running {
@@ -769,6 +776,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, ctx: &egui::Context) {
                                 }
                             }
                             model_trigger(app, ui, &t);
+                            backend_trigger(app, ui, &t);
                         });
                     });
                 });
@@ -1081,8 +1089,48 @@ fn model_trigger(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
     }
 }
 
-/// The popup: a search box, then every model of every provider, grouped.
+/// Whom the next turn runs on, beside the model picker when the row has room for it (the panel
+/// at its narrow default doesn't, and the picker's own top section still chooses). Its own
+/// share of the row: the name elides into it, and with no room at all it isn't drawn.
+fn backend_trigger(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    if app.ui.agent.backends.is_empty() {
+        return;
+    }
+    let name = app.ui.agent.effective_name();
+    let id = egui::Id::new("agent_backend_picker");
+    // Room for the chevron, in the gap this opens between the model's name and this one.
+    let room = (ui.available_width() - 16.0).min(84.0);
+    if room < 40.0 {
+        return;
+    }
+    ui.add_space(16.0);
+    let shown = widgets::elide_font(ui, &name, room, regular(10.5));
+    let resp = ui
+        .add(egui::Label::new(RichText::new(shown).font(regular(10.5)).color(t.text_secondary)).sense(Sense::click()))
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    crate::a11y::button(&resp, &trf("Runs on: {name}", &[("name", &name)]));
+    let chevron = Rect::from_center_size(pos2(resp.rect.right() + 8.0, resp.rect.center().y), vec2(9.0, 9.0));
+    crate::icons::paint(ui.painter(), chevron, crate::icons::Icon::Chevron, t.icon_secondary);
+    egui::Popup::from_toggle_button_response(&resp)
+        .id(id)
+        .align(egui::RectAlign::TOP_START)
+        .width(160.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.add_space(6.0);
+            backend_menu(app, ui, t);
+            ui.add_space(6.0);
+        });
+}
+
+/// The popup: the backends a turn can run on, then a search box, then every model of every
+/// provider, grouped.
 fn model_menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    ui.add_space(6.0);
+    // Whom a turn can run on, first: the rows below are routes, and a route you can't see or
+    // change is a promise you can't take — a Claude account at its usage limit until next
+    // month, say, with Codex installed right beside it.
+    run_on(app, ui, t);
     ui.add_space(6.0);
     let search = egui::TextEdit::singleline(&mut app.ui.agent.models.search)
         .hint_text(tr("Search models..."))
@@ -1126,8 +1174,75 @@ fn model_menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
     });
     if let Some(i) = clicked {
         app.ui.agent.models.pick(i);
+        // The model's route decides who runs it; follow it, so the row beside the picker never
+        // names a CLI the model won't run on.
+        let kind = app.ui.agent.models.route(&app.ui.agent.backends, app.ui.agent.backend).kind();
+        if let Some(kind) = kind
+            && let Some(at) = app.ui.agent.backends.iter().position(|b| b.kind == kind)
+        {
+            app.ui.agent.backend = at;
+        }
         ui.close();
     }
+}
+
+/// The model picker's own section of backends, at its top: this computer's installed CLIs and
+/// APIs, the one the next turn runs on marked. Empty computer: say so where they would be.
+fn run_on(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    ui.horizontal(|ui| {
+        ui.add_space(10.0);
+        ui.label(RichText::new(tr("RUN ON")).font(semibold(9.5)).color(t.text_secondary));
+    });
+    ui.add_space(2.0);
+    if app.ui.agent.backends.is_empty() {
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.label(RichText::new(tr("No agent backend was found on this computer.")).font(regular(10.5)).color(t.text_secondary));
+        });
+        return;
+    }
+    backend_menu(app, ui, t);
+}
+
+/// The backend rows themselves, drawn for both the model picker's section and the row's own
+/// popup: the one the next turn runs on marked, a click moving the turn (and the model, which
+/// a backend only runs its own of) to the one clicked.
+fn backend_menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
+    let active = app.ui.agent.models.route(&app.ui.agent.backends, app.ui.agent.backend).kind();
+    let mut clicked = None;
+    for (i, b) in app.ui.agent.backends.iter().enumerate() {
+        if menu_row(ui, t, b.kind.name(), active == Some(b.kind)) {
+            clicked = Some(i);
+        }
+    }
+    if let Some(i) = clicked {
+        select_backend(app, i);
+    }
+}
+
+/// The next turn runs on backend `i`: take a model it runs with it, and drop the stale refusal
+/// that named another.
+fn select_backend(app: &mut FigApp, i: usize) {
+    app.ui.agent.backend = i;
+    if let Some(backend) = app.ui.agent.backends.get(i) {
+        app.ui.agent.models.align(backend.kind);
+    }
+    app.ui.agent.setup_error = None;
+}
+
+/// One menu row: the name, marked when it's the one, the whole row the click.
+fn menu_row(ui: &mut Ui, t: &Tokens, label: &str, marked: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    if marked {
+        ui.painter().rect_filled(rect, CornerRadius::same(5), t.selected_row);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(5), t.hover);
+    }
+    let font = if marked { semibold(11.5) } else { regular(11.5) };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font, t.text);
+    let y = rect.min.y + (rect.height() - galley.size().y) * 0.5;
+    ui.painter().galley(pos2(rect.min.x + 10.0, y), galley, t.text);
+    resp.clicked()
 }
 
 /// One model row: full width, highlighted when picked or hovered.

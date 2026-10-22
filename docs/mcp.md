@@ -39,11 +39,13 @@ breaks a line, Stop ends the turn (the conversation resumes where it stopped). I
 backends: an installed CLI (`claude`, `opencode` or `codex`), or an API key pasted into
 Preferences ▸ AI agents.
 
-The input box at the bottom holds the controls: which backend runs the turns (its name on the left,
-a chevron to cycle when this computer has more than one) and which model it runs (a picker over
-one merged list of Claude, Codex and OpenAI models, which routes each turn to a backend that
-can run it — a Claude model goes to `claude` when it is installed, else to the Anthropic API when
-a key is set). Above it, *New chat* starts over and the session dropdown opens the chat history —
+The input box at the bottom holds the controls: which model it runs (a picker over one merged list
+of Claude, Codex and OpenAI models) and which backend runs the turns — the backend's name sits
+beside the picker when the row has room for it, and the picker itself opens with a *Run on* section
+listing the installed backends first. The two choose each other: picking a model moves the turn to
+a backend that can run it (a Claude model goes to `claude` when it is installed, else to the
+Anthropic API when a key is set), and picking a backend keeps the model when that backend runs it,
+else the backend's default. Above it, *New chat* starts over and the session dropdown opens the chat history —
 today's, the previous week's, older — kept in the app's config folder (`AgentSessions.json`)
 and restored on the next launch, each conversation with its session id so it resumes where it
 stopped. Clearing the history needs a second click. Drop a file on the panel and it rides along

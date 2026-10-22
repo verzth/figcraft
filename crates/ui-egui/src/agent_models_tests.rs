@@ -151,6 +151,49 @@ fn a_codex_only_computer_starts_on_gpt() {
     assert_eq!(models.route(&backends, 0), Route::Model { kind: BackendKind::Codex, id: "gpt-6.1-sol".into() });
 }
 
+/// A backend switch takes a model the new backend runs — the picker's own default of that
+/// provider when the picked one isn't its own (Sonnet on Claude, GPT on Codex), and the picked
+/// one kept when the backend runs it anyway (OpenCode takes every provider's).
+#[test]
+fn a_backend_switch_moves_the_model_to_one_it_runs() {
+    let mut models = Models::default();
+    let backends = vec![
+        PanelBackend { kind: BackendKind::ClaudeCode, bin: Some("/bin/claude".into()) },
+        PanelBackend { kind: BackendKind::Codex, bin: Some("/bin/codex".into()) },
+        PanelBackend { kind: BackendKind::OpenCode, bin: Some("/bin/opencode".into()) },
+    ];
+    models.ensure(&backends);
+    assert_eq!(models.label(), "Claude Sonnet 5.5");
+    // OpenCode runs Anthropic's names too: the pick stays, routed under `anthropic/…`.
+    models.align(BackendKind::OpenCode);
+    assert_eq!(models.label(), "Claude Sonnet 5.5");
+    assert_eq!(models.route(&backends, 2), Route::Model { kind: BackendKind::OpenCode, id: "anthropic/claude-sonnet-5-5".into() });
+    // Codex takes its own: the picker moves to GPT, its first.
+    models.align(BackendKind::Codex);
+    assert_eq!(models.label(), "GPT 6.1 Sol");
+    assert_eq!(models.route(&backends, 1), Route::Model { kind: BackendKind::Codex, id: "gpt-6.1-sol".into() });
+    // Back to Claude Code: a Claude name again, the curated default rather than the first.
+    models.align(BackendKind::ClaudeCode);
+    assert_eq!(models.label(), "Claude Sonnet 5.5");
+    assert_eq!(models.route(&backends, 0), Route::Model { kind: BackendKind::ClaudeCode, id: "claude-sonnet-5-5".into() });
+}
+
+/// Every running route names the backend it runs on — the row beside the picker reads that
+/// name — and the ones that run nothing name none.
+#[test]
+fn a_running_route_names_the_backend_that_runs_it() {
+    let mut models = Models::default();
+    let backends = vec![PanelBackend { kind: BackendKind::OpenCode, bin: Some("/bin/opencode".into()) }];
+    models.ensure(&backends);
+    assert_eq!(models.route(&backends, 0).kind(), Some(BackendKind::OpenCode));
+    let claude_only = vec![PanelBackend { kind: BackendKind::ClaudeCode, bin: Some("/bin/claude".into()) }];
+    models.search = "gpt".into();
+    let gpt = models.choices().iter().position(|m| m.id == "gpt-6.1-sol").unwrap_or(0);
+    models.pick(gpt);
+    assert_eq!(models.route(&claude_only, 0).kind(), None, "an unsupported model names no backend");
+    assert_eq!(models.route(&[], 0).kind(), None, "no backend at all names none");
+}
+
 /// The user's `opencode models` output, kept so the parser is checked against real lines.
 const OPENCODE_MODELS: &str = "anthropic/claude-fable-5
 anthropic/claude-fable-5-1

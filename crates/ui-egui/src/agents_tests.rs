@@ -99,7 +99,11 @@ fn tree(u: &mut Ui) -> Vec<Node> {
 }
 
 fn named(u: &mut Ui, label: &str) -> Option<Node> {
-    tree(u).into_iter().find(|n| n.label() == Some(label) || n.value() == Some(label))
+    // The update's node list is a hash-map iteration, so among same-named controls take the
+    // topmost one — the row a reader of the screen (and of these tests) means.
+    let mut hits: Vec<Node> = tree(u).into_iter().filter(|n| n.label() == Some(label) || n.value() == Some(label)).collect();
+    hits.sort_by_key(|n| n.bounds().map(|b| ((b.y0 * 2.0) as i32, (b.x0 * 2.0) as i32)).unwrap_or((i32::MAX, i32::MAX)));
+    hits.into_iter().next()
 }
 
 /// Click the control named `label`, as a pointer would.
@@ -127,6 +131,25 @@ fn the_empty_state_turns_mcp_on_and_remembers_it() {
     assert!(u.app.session.prefs.agents.enabled, "and turns on with FigCraft from now on");
     assert!(named(&mut u, "MCP is on").is_some());
     assert!(named(&mut u, "Waiting for an agent. After installing, open the client and ask: “Use FigCraft to create a 1440 × 900 frame.”").is_some());
+}
+
+/// The Preferences window fits the screen with its header: the AI agents tab is taller than a
+/// laptop window, and a window centered on that height clipped its own title and close button
+/// above the top edge — with the tab's bottom unreachable behind them (the tab now scrolls).
+#[test]
+fn the_preferences_window_fits_the_screen_with_its_header() {
+    let (mut u, _fake, _copied) = setup(Host::default());
+    let mut painted = Vec::new();
+    for clipped in &u.frame_output(vec![]).shapes {
+        painted.extend(crate::live_tests::flat(std::slice::from_ref(clipped)));
+    }
+    let (_, at, size) =
+        crate::live_tests::texts(&painted).into_iter().find(|(t, _, _)| t == "Preferences").unwrap_or_else(|| panic!("the dialog paints its title"));
+    assert!(at.y >= 0.0 && at.y + size.y <= 900.0, "the title sits inside the screen (y={}..{})", at.y, at.y + size.y);
+    // The close button too, by its bounds on the accessibility tree.
+    let close = named(&mut u, "Close").expect("the dialog's close button");
+    let b = close.bounds().expect("the close button has bounds");
+    assert!(b.y0 >= 0.0 && b.y1 <= 900.0, "the close button sits inside the screen (y {}..{})", b.y0, b.y1);
 }
 
 #[test]

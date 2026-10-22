@@ -235,7 +235,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 ui.set_width(PREFS_WIDTH);
-                let (head, _) = ui.allocate_exact_size(vec2(PREFS_WIDTH, 40.0), Sense::hover());
+                let (head, _) = ui.allocate_exact_size(vec2(PREFS_WIDTH, PREFS_HEADER), Sense::hover());
                 ui.painter().text(egui::pos2(head.min.x + 16.0, head.center().y), Align2::LEFT_CENTER, tr("Preferences"), semibold(13.0), t.text);
                 let close = egui::Rect::from_center_size(egui::pos2(head.max.x - 20.0, head.center().y), vec2(24.0, 24.0));
                 let cresp = ui.interact(close, ui.id().with("prefs_close"), Sense::click());
@@ -274,18 +274,36 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
                     ui.add_space(1.0);
                     let top = ui.min_rect().min.y;
                     // The tab.
-                    egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 28, bottom: 28 }).show(ui, |ui| {
-                        // Top to bottom (the frame would take the row's direction).
-                        ui.vertical(|ui| {
-                            ui.set_width(crate::agents::WIDTH);
-                            if app.ui.prefs_tab == PrefsTab::Agents {
-                                crate::agents::tab(app, ui);
-                            } else {
-                                ui.spacing_mut().item_spacing = vec2(8.0, 4.0);
-                                general_prefs(app, ui, &t);
-                            }
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin { left: 32, right: 32, top: PREFS_MARGIN_Y as i8, bottom: PREFS_MARGIN_Y as i8 })
+                        .show(ui, |ui| {
+                            // Top to bottom (the frame would take the row's direction). The tab
+                            // scrolls under the fixed header: the AI agents tab is taller than
+                            // a laptop window, and a window centered on its full height clipped
+                            // its own header above the screen with the tab's bottom unreachable.
+                            ui.vertical(|ui| {
+                                ui.set_width(crate::agents::WIDTH);
+                                // Offer the tab its `room` of height in its own right: a
+                                // ScrollArea limited to the window's current size never grows
+                                // the window (it sizes to what its content allocates), so the
+                                // dialog would stay at its first size and clip the tab — its
+                                // header included — into a too-short scroller. Tall content
+                                // fills the room and scrolls beneath the fixed header; short
+                                // content sizes the window to itself.
+                                let room = (ui.ctx().content_rect().height() - PREFS_HEADER - 2.0 * PREFS_MARGIN_Y - 24.0).max(240.0);
+                                let offered = vec2(ui.available_width(), room);
+                                ui.allocate_ui_with_layout(offered, egui::Layout::top_down(egui::Align::Min), |ui| {
+                                    egui::ScrollArea::vertical().id_salt("prefs_tab").auto_shrink([false, true]).max_height(room).show(ui, |ui| {
+                                        if app.ui.prefs_tab == PrefsTab::Agents {
+                                            crate::agents::tab(app, ui);
+                                        } else {
+                                            ui.spacing_mut().item_spacing = vec2(8.0, 4.0);
+                                            general_prefs(app, ui, &t);
+                                        }
+                                    });
+                                });
+                            });
                         });
-                    });
                     let x = ui.min_rect().min.x + PREFS_SIDEBAR;
                     ui.painter().vline(x, top..=ui.min_rect().max.y, Stroke::new(1.0, t.border));
                 });
@@ -769,6 +787,11 @@ fn export_dialog(app: &mut FigApp, ctx: &Context) {
 /// The Preferences window's width: the sidebar, its rule and the tab with its margins.
 const PREFS_SIDEBAR: f32 = 180.0;
 const PREFS_WIDTH: f32 = PREFS_SIDEBAR + 1.0 + crate::agents::WIDTH + 64.0;
+/// The header's height and the frame's vertical margins: what's left of the screen is the
+/// tab's scroll room (the AI agents tab is taller than a laptop window, and a window centered
+/// on its full height clipped its own header above the screen).
+const PREFS_HEADER: f32 = 40.0;
+const PREFS_MARGIN_Y: f32 = 28.0;
 
 /// Preferences ▸ General.
 fn general_prefs(app: &mut FigApp, ui: &mut egui::Ui, t: &Tokens) {
